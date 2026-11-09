@@ -1,0 +1,13 @@
+[package]
+name = "aim_calibration"
+version = "0.1.0"
+edition = "2024"
+description = "Trouvez la sensibilité de souris idéale pour vos jeux FPS"
+license-file = "LICENSE"
+publish = false
+
+[dependencies]
+macroquad = "0.4"
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_UI_Input", "Win32_Devices_HumanInterfaceDevice", "Win32_Storage_FileSystem", "Win32_Security"] }

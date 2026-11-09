@@ -1,0 +1,52 @@
+LICENCE PROPRIÉTAIRE — AIM CALIBRATION
+
+Copyright (c) 2026 MasterBougli. Tous droits réservés.
+
+Le logiciel « Aim Calibration », son code source, ses fichiers exécutables, sa
+documentation et tous les éléments qui l'accompagnent (ci-après « le Logiciel »)
+sont la propriété exclusive de leur auteur, MasterBougli, et sont protégés par le
+droit d'auteur.
+
+1. DROITS ACCORDÉS
+   L'auteur vous accorde, gratuitement, un droit personnel, non exclusif, non
+   transférable et révocable de télécharger le Logiciel et de l'exécuter, sous la
+   forme distribuée par l'auteur, pour votre usage personnel et non commercial.
+
+   Le code source est rendu public uniquement pour consultation. Sa
+   publication ne vous accorde aucun autre droit que ceux décrits ci-dessus.
+
+2. INTERDICTIONS
+   Sauf autorisation écrite et préalable de l'auteur, il est interdit de :
+   a) vendre, louer, céder ou commercialiser le Logiciel, en tout ou partie,
+      ou de l'utiliser dans un produit ou un service payant ;
+   b) modifier, adapter, traduire ou créer des œuvres dérivées du Logiciel ou
+      de son code source ;
+   c) copier, redistribuer, republier ou héberger le Logiciel ou son code source,
+      modifié ou non, y compris gratuitement ;
+   d) réutiliser tout ou partie du code source dans un autre projet ;
+   e) retirer ou modifier les mentions de droit d'auteur ou la présente licence ;
+   f) présenter le Logiciel comme étant votre création.
+
+3. GITHUB
+   Le fait que le dépôt soit public sur GitHub permet uniquement de le consulter
+   et de le dupliquer (« fork ») sur GitHub, dans la stricte mesure exigée par les
+   conditions d'utilisation de GitHub. Aucun autre droit n'est accordé : une copie
+   ou un fork ne peut pas être modifié, redistribué ou utilisé en dehors de ce cadre.
+
+4. ABSENCE DE GARANTIE
+   Le Logiciel est fourni « tel quel », sans garantie d'aucune sorte, expresse ou
+   implicite. L'auteur ne pourra être tenu responsable d'aucun dommage résultant
+   de l'utilisation ou de l'impossibilité d'utiliser le Logiciel.
+
+5. RÉSILIATION
+   Toute violation de la présente licence met fin automatiquement et immédiatement
+   aux droits qu'elle vous accorde.
+
+6. DROIT APPLICABLE
+   La présente licence est régie par le droit français.
+
+Pour toute demande d'autorisation, contactez l'auteur via GitHub :
+https://github.com/MasterBougli
+
+Les bibliothèques tierces utilisées (macroquad, miniquad, windows-sys, etc.)
+restent soumises à leurs propres licences, mentionnées dans THIRD_PARTY_LICENSES.md.
