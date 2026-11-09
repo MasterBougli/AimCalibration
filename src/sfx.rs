@@ -7,6 +7,7 @@ pub struct Sfx {
     head: Option<Sound>,
     miss: Option<Sound>,
     done: Option<Sound>,
+    volume: f32,
 }
 
 impl Sfx {
@@ -16,29 +17,37 @@ impl Sfx {
             head: tone(1320.0, 90, 0.4).await,
             miss: tone(180.0, 90, 0.3).await,
             done: chime().await,
+            volume: 0.7,
         }
     }
 
+    pub fn set_volume(&mut self, percent: u8) {
+        self.volume = percent.min(100) as f32 / 100.0;
+    }
+
     pub fn hit(&self) {
-        play(self.hit.as_ref());
+        self.play(self.hit.as_ref());
     }
 
     pub fn head(&self) {
-        play(self.head.as_ref());
+        self.play(self.head.as_ref());
     }
 
     pub fn miss(&self) {
-        play(self.miss.as_ref());
+        self.play(self.miss.as_ref());
     }
 
     pub fn done(&self) {
-        play(self.done.as_ref());
+        self.play(self.done.as_ref());
     }
-}
 
-fn play(sound: Option<&Sound>) {
-    if let Some(sound) = sound {
-        play_sound(sound, PlaySoundParams { looped: false, volume: 0.7 });
+    fn play(&self, sound: Option<&Sound>) {
+        if self.volume <= 0.0 {
+            return;
+        }
+        if let Some(sound) = sound {
+            play_sound(sound, PlaySoundParams { looped: false, volume: self.volume });
+        }
     }
 }
 

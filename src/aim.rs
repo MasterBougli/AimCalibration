@@ -2,6 +2,8 @@ use macroquad::prelude::*;
 use macroquad::rand::gen_range;
 
 pub const EYE: Vec3 = Vec3::new(0.0, 1.7, 0.0);
+/// Zoom appliqué tant que le clic droit est maintenu.
+pub const ADS_ZOOM: f32 = 1.5;
 pub const FLICK_TARGETS: u32 = 12;
 pub const TRACK_DURATION: f32 = 8.0;
 const TARGET_DIST: f32 = 12.0;
@@ -20,6 +22,10 @@ pub enum TestKind {
     Switching,
     /// La cible apparaît après un délai aléatoire : on mesure le temps de réaction.
     Reflex,
+    /// La cible sort brièvement de derrière un mur.
+    Peek,
+    /// Flick qui s'arrête quand le niveau récent est retrouvé.
+    Warmup,
 }
 
 /// Rayon de la cible (à 12 m).
@@ -114,6 +120,11 @@ pub struct Stats {
     pub flick_ms: Vec<f32>,
     pub track_on: f32,
     pub track_total: f32,
+    /// Sommes des mesures de trajectoire, divisées par `traces`.
+    pub overshoot: f32,
+    pub tremor: f32,
+    pub correction_ms: f32,
+    pub traces: u32,
 }
 
 impl Stats {
@@ -140,6 +151,31 @@ impl Stats {
             return 0.0;
         }
         (self.accuracy() * 100.0 * 600.0 / avg).min(150.0)
+    }
+
+    pub fn avg_overshoot(&self) -> f32 {
+        if self.traces == 0 { 0.0 } else { self.overshoot / self.traces as f32 }
+    }
+
+    pub fn avg_tremor(&self) -> f32 {
+        if self.traces == 0 { 0.0 } else { self.tremor / self.traces as f32 }
+    }
+
+    pub fn avg_correction(&self) -> f32 {
+        if self.traces == 0 { 0.0 } else { self.correction_ms / self.traces as f32 }
+    }
+
+    /// Écart entre le quart des flicks les plus rapides et le quart des plus lents.
+    pub fn spread_ms(&self) -> Option<f32> {
+        if self.flick_ms.len() < 4 {
+            return None;
+        }
+        let mut times = self.flick_ms.clone();
+        times.sort_by(f32::total_cmp);
+        let quarter = (times.len() / 4).max(1);
+        let fast = times[..quarter].iter().sum::<f32>() / quarter as f32;
+        let slow = times[times.len() - quarter..].iter().sum::<f32>() / quarter as f32;
+        Some(slow - fast)
     }
 
     pub fn tracking_pct(&self) -> f32 {
@@ -189,6 +225,14 @@ enum Hit {
     Miss,
 }
 
+#[derive(Clone)]
+pub struct MissReplay {
+    pub path: Vec<(f32, f32)>,
+    pub target: (f32, f32),
+    /// Écart, en degrés, entre le viseur et la cible au moment du tir.
+    pub error: f32,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum Feedback {
     None,
@@ -205,6 +249,8 @@ pub struct AimTest {
     pub on_target: bool,
     pub stats: Stats,
     pub feedback: Feedback,
+    pub zoomed: bool,
+    pub worst: Option<MissReplay>,
     settings: Settings,
     deg_per_count: f32,
     flick_time_left: f32,
@@ -221,11 +267,28 @@ pub struct AimTest {
     bots: [(f32, f32); 2],
     active: usize,
     hidden_until: f64,
+    v_ratio: f32,
+    flick_budget: f32,
+    trace: Vec<(f64, f32, f32)>,
+    aim_origin: (f32, f32),
+    cover_yaw: f32,
+    peek_sign: f32,
+    peek_out: f32,
+    peek_going_out: bool,
+    peek_hold: f32,
+    peek_shown_for: f32,
+    peek_rewarded: bool,
+    ads_ratio: f32,
+    invert_y: bool,
+    miss_path: Vec<(f32, f32)>,
+    miss_target: (f32, f32),
+    miss_until: f64,
 }
 
 impl AimTest {
     /// Le calibrage ignore `settings` et utilise toujours la difficulté Normale.
-    pub fn new(deg_per_count: f32, kind: TestKind, settings: Settings) -> Self {
+    /// `v_ratio` : multiplicateur vertical. `ads_ratio` : multiplicateur en visée (clic droit).
+    pub fn new(deg_per_count: f32, kind: TestKind, settings: Settings, v_ratio: f32, ads_ratio: f32, invert_y: bool) -> Self {
         let settings = if kind == TestKind::Calibration {
             Settings::preset(NORMAL, DEFAULT_DURATION)
         } else {
@@ -239,6 +302,8 @@ impl AimTest {
             on_target: false,
             stats: Stats::default(),
             feedback: Feedback::None,
+            zoomed: false,
+            worst: None,
             settings,
             deg_per_count,
             flick_time_left: settings.duration_secs(),
@@ -255,15 +320,43 @@ impl AimTest {
             bots: [(0.0, 5.0), (20.0, 5.0)],
             active: 0,
             hidden_until: 0.0,
+            v_ratio: v_ratio.clamp(0.1, 2.0),
+            flick_budget: if kind == TestKind::Warmup { 180.0 } else { settings.duration_secs() },
+            trace: Vec::new(),
+            aim_origin: (0.0, 0.0),
+            cover_yaw: -18.0,
+            peek_sign: 1.0,
+            peek_out: 0.0,
+            peek_going_out: true,
+            peek_hold: 0.4,
+            peek_shown_for: 0.0,
+            peek_rewarded: false,
+            ads_ratio: ads_ratio.clamp(0.1, 2.0),
+            invert_y,
+            miss_path: Vec::new(),
+            miss_target: (0.0, 0.0),
+            miss_until: 0.0,
         };
+        if kind == TestKind::Warmup {
+            test.flick_time_left = 180.0;
+        }
         match kind {
             TestKind::Tracking => test.start_tracking(),
             TestKind::Reflex => test.begin_reflex_wait(),
             TestKind::Switching => test.spawn_switch(),
             TestKind::Micro => test.spawn_micro(),
+            TestKind::Peek => test.phase = Phase::Flick,
             _ => test.spawn_flick(),
         }
         test
+    }
+
+    pub fn elapsed(&self) -> f32 {
+        (self.flick_budget - self.flick_time_left).max(0.0)
+    }
+
+    pub fn request_finish(&mut self) {
+        self.phase = Phase::Done;
     }
 
     fn begin_reflex_wait(&mut self) {
@@ -272,7 +365,15 @@ impl AimTest {
     }
 
     fn timed_drill(&self) -> bool {
-        matches!(self.kind, TestKind::Flick | TestKind::Micro | TestKind::Switching | TestKind::Reflex)
+        matches!(
+            self.kind,
+            TestKind::Flick | TestKind::Micro | TestKind::Switching | TestKind::Reflex | TestKind::Peek | TestKind::Warmup
+        )
+    }
+
+    fn begin_trace(&mut self) {
+        self.trace.clear();
+        self.aim_origin = (self.yaw, self.pitch);
     }
 
     fn start_tracking(&mut self) {
@@ -298,6 +399,7 @@ impl AimTest {
         let drift = MOTIONS[self.settings.motion].1;
         self.drift_vel = if gen_range(0.0f32, 1.0) < 0.5 { drift } else { -drift };
         self.target_spawn = get_time();
+        self.begin_trace();
     }
 
     fn spawn_micro(&mut self) {
@@ -313,6 +415,7 @@ impl AimTest {
         let drift = MOTIONS[self.settings.motion].1;
         self.drift_vel = drift * Self::random_sign();
         self.target_spawn = get_time();
+        self.begin_trace();
     }
 
     fn spawn_switch(&mut self) {
@@ -325,6 +428,7 @@ impl AimTest {
         let drift = MOTIONS[self.settings.motion].1;
         self.drift_vel = if drift == 0.0 { 0.0 } else { drift };
         self.phase = Phase::Flick;
+        self.begin_trace();
     }
 
     fn primary(&self) -> (f32, f32) {
@@ -396,10 +500,13 @@ impl AimTest {
     }
 
     /// `counts` : déplacement brut de la souris (comptes du capteur) depuis la frame précédente.
-    pub fn update(&mut self, counts: Vec2, shot: bool, dt: f32) {
+    pub fn update(&mut self, counts: Vec2, shot: bool, zoomed: bool, dt: f32) {
         self.feedback = Feedback::None;
-        self.yaw += counts.x * self.deg_per_count;
-        self.pitch = (self.pitch - counts.y * self.deg_per_count).clamp(-89.0, 89.0);
+        self.zoomed = zoomed;
+        let ads = if zoomed { self.ads_ratio } else { 1.0 };
+        let y_sign = if self.invert_y { 1.0 } else { -1.0 };
+        self.yaw += counts.x * self.deg_per_count * ads;
+        self.pitch = (self.pitch + y_sign * counts.y * self.deg_per_count * self.v_ratio * ads).clamp(-89.0, 89.0);
 
         match self.phase {
             Phase::Hidden => {
@@ -414,18 +521,39 @@ impl AimTest {
                 }
             }
             Phase::Flick => {
-                if shot && self.register_shot() {
-                    self.stats.flick_ms.push(((get_time() - self.target_spawn) * 1000.0) as f32);
-                    self.flick_left = self.flick_left.saturating_sub(1);
-                    match self.kind {
-                        TestKind::Calibration if self.flick_left == 0 => self.start_tracking(),
-                        TestKind::Reflex => self.begin_reflex_wait(),
-                        TestKind::Switching => self.active = 1 - self.active,
-                        TestKind::Micro => self.spawn_micro(),
-                        _ => self.spawn_flick(),
+                let peek_hidden = self.kind == TestKind::Peek && self.peek_out < 0.55;
+                if shot && peek_hidden {
+                    self.stats.shots += 1;
+                    self.feedback = Feedback::Miss;
+                } else if shot {
+                    let hit = self.register_shot();
+                    if !hit {
+                        self.remember_miss();
+                    }
+                    self.analyze_trace();
+                    if hit {
+                        self.stats.flick_ms.push(((get_time() - self.target_spawn) * 1000.0) as f32);
+                        self.flick_left = self.flick_left.saturating_sub(1);
+                        match self.kind {
+                            TestKind::Calibration if self.flick_left == 0 => self.start_tracking(),
+                            TestKind::Reflex => self.begin_reflex_wait(),
+                            TestKind::Switching => {
+                                self.active = 1 - self.active;
+                                self.begin_trace();
+                            }
+                            TestKind::Micro => self.spawn_micro(),
+                            TestKind::Peek => {
+                                self.peek_rewarded = true;
+                                self.peek_going_out = false;
+                            }
+                            _ => self.spawn_flick(),
+                        }
                     }
                 }
                 self.tick_targets(dt);
+                if self.kind == TestKind::Peek && self.peek_out >= 0.55 && self.trace.is_empty() {
+                    self.begin_trace();
+                }
             }
             Phase::TrackWait => {
                 if self.aiming_at_target() {
@@ -481,10 +609,169 @@ impl AimTest {
             }
         }
 
+        if self.phase == Phase::Flick && self.kind != TestKind::Tracking {
+            self.trace.push((get_time(), self.yaw, self.pitch));
+            if self.trace.len() > 360 {
+                self.trace.drain(0..120);
+            }
+        }
+
         self.on_target = matches!(self.phase, Phase::Track | Phase::TrackWait) && self.aiming_at_target();
     }
 
+    fn remember_miss(&mut self) {
+        if self.trace.len() < 2 {
+            return;
+        }
+        self.miss_path = self.trace.iter().map(|sample| (sample.1, sample.2)).collect();
+        self.miss_path.push((self.yaw, self.pitch));
+        self.miss_target = self.primary();
+        self.miss_until = get_time() + 1.4;
+        let error = {
+            let dy = self.yaw - self.miss_target.0;
+            let dp = self.pitch - self.miss_target.1;
+            (dy * dy + dp * dp).sqrt()
+        };
+        if self.worst.as_ref().is_none_or(|replay| error > replay.error) {
+            self.worst = Some(MissReplay { path: self.miss_path.clone(), target: self.miss_target, error });
+        }
+    }
+
+    /// Dessine un raté avec la cible au centre. `radius` est la taille du cadre, en pixels.
+    pub fn draw_replay(replay: &MissReplay, cx: f32, cy: f32, radius: f32) {
+        let mut reach = replay.error.max(2.0);
+        for &(yaw, pitch) in &replay.path {
+            let dy = yaw - replay.target.0;
+            let dp = pitch - replay.target.1;
+            reach = reach.max((dy * dy + dp * dp).sqrt());
+        }
+        let scale = radius / reach;
+        let map = |yaw: f32, pitch: f32| vec2(cx + (yaw - replay.target.0) * scale, cy - (pitch - replay.target.1) * scale);
+        draw_rectangle(cx - radius - 18.0, cy - radius - 18.0, radius * 2.0 + 36.0, radius * 2.0 + 36.0, Color::new(0.04, 0.05, 0.07, 0.9));
+        draw_rectangle_lines(cx - radius - 18.0, cy - radius - 18.0, radius * 2.0 + 36.0, radius * 2.0 + 36.0, 1.5, Color::new(1.0, 1.0, 1.0, 0.15));
+        draw_circle(cx, cy, 7.0, Color::from_rgba(255, 210, 70, 255));
+        let color = Color::from_rgba(255, 110, 90, 255);
+        for window in replay.path.windows(2) {
+            let a = map(window[0].0, window[0].1);
+            let b = map(window[1].0, window[1].1);
+            draw_line(a.x, a.y, b.x, b.y, 2.5, color);
+        }
+        if let Some(&(yaw, pitch)) = replay.path.last() {
+            let end = map(yaw, pitch);
+            draw_circle(end.x, end.y, 4.0, color);
+        }
+    }
+
+    /// Trace le chemin du viseur menant au dernier tir raté, et marque la cible.
+    pub fn draw_miss_path(&self, hfov: f32) {
+        if get_time() > self.miss_until || self.miss_path.len() < 2 {
+            return;
+        }
+        let alpha = ((self.miss_until - get_time()) / 1.4).clamp(0.0, 1.0) as f32;
+        let px = screen_width() / hfov.max(40.0);
+        let (cx, cy) = (screen_width() / 2.0, screen_height() / 2.0);
+        let project = |yaw: f32, pitch: f32| vec2(cx + (yaw - self.yaw) * px, cy - (pitch - self.pitch) * px);
+        let color = Color::new(1.0, 0.42, 0.35, alpha);
+        for window in self.miss_path.windows(2) {
+            let a = project(window[0].0, window[0].1);
+            let b = project(window[1].0, window[1].1);
+            draw_line(a.x, a.y, b.x, b.y, 3.0, color);
+        }
+        let end = project(self.miss_path.last().unwrap().0, self.miss_path.last().unwrap().1);
+        draw_circle(end.x, end.y, 4.0, color);
+        let target = project(self.miss_target.0, self.miss_target.1);
+        draw_circle_lines(target.x, target.y, 14.0, 2.0, Color::new(1.0, 0.85, 0.3, alpha));
+    }
+
+    fn analyze_trace(&mut self) {
+        let target = self.primary();
+        let origin = self.aim_origin;
+        let v = (target.0 - origin.0, target.1 - origin.1);
+        let vlen2 = v.0 * v.0 + v.1 * v.1;
+        if vlen2 < 0.36 || self.trace.len() < 4 {
+            return;
+        }
+        let mut max_t = 0.0f32;
+        for &(_, y, p) in &self.trace {
+            max_t = max_t.max(((y - origin.0) * v.0 + (p - origin.1) * v.1) / vlen2);
+        }
+        let overshoot = ((max_t - 1.0).max(0.0) * vlen2.sqrt()).min(40.0);
+
+        let now = get_time();
+        let recent: Vec<_> = self.trace.iter().copied().filter(|sample| now - sample.0 <= 0.22).collect();
+        let mut reversals = 0.0f32;
+        let mut reversals_n = 0u32;
+        for window in recent.windows(3) {
+            let a = (window[1].1 - window[0].1, window[1].2 - window[0].2);
+            let b = (window[2].1 - window[1].1, window[2].2 - window[1].2);
+            if a.0 * b.0 + a.1 * b.1 < 0.0 {
+                reversals += (b.0 * b.0 + b.1 * b.1).sqrt();
+                reversals_n += 1;
+            }
+        }
+        let tremor = if reversals_n == 0 { 0.0 } else { reversals / reversals_n as f32 };
+
+        let correction = self
+            .trace
+            .iter()
+            .find(|sample| {
+                let dy = sample.1 - target.0;
+                let dp = sample.2 - target.1;
+                dy * dy + dp * dp < 6.25
+            })
+            .map(|sample| ((now - sample.0) * 1000.0) as f32)
+            .unwrap_or(0.0);
+
+        self.stats.overshoot += overshoot;
+        self.stats.tremor += tremor;
+        self.stats.correction_ms += correction;
+        self.stats.traces += 1;
+        self.trace.clear();
+        self.aim_origin = (self.yaw, self.pitch);
+    }
+
+    fn tick_peek(&mut self, dt: f32) {
+        let mult = SPEEDS[self.settings.speed].1;
+        if self.peek_hold > 0.0 {
+            self.peek_hold -= dt;
+            self.peek_out = 0.0;
+            self.target_yaw = self.cover_yaw;
+            self.target_pitch = 3.5;
+            return;
+        }
+        let rate = 1.7 * mult;
+        if self.peek_going_out {
+            self.peek_out = (self.peek_out + rate * dt).min(1.0);
+            if self.peek_out >= 1.0 {
+                self.peek_shown_for += dt;
+                if self.peek_shown_for >= 0.6 / mult {
+                    self.peek_going_out = false;
+                }
+            }
+        } else {
+            self.peek_out = (self.peek_out - rate * 1.3 * dt).max(0.0);
+            if self.peek_out <= 0.0 {
+                if !self.peek_rewarded {
+                    self.stats.expired += 1;
+                }
+                self.peek_rewarded = false;
+                self.peek_shown_for = 0.0;
+                self.peek_sign = -self.peek_sign;
+                self.cover_yaw = self.peek_sign * gen_range(14.0, 30.0);
+                self.peek_hold = gen_range(0.3, 0.9);
+                self.peek_going_out = true;
+                self.trace.clear();
+            }
+        }
+        self.target_yaw = self.cover_yaw - self.peek_sign * self.peek_out * 15.0;
+        self.target_pitch = 3.5;
+    }
+
     fn tick_targets(&mut self, dt: f32) {
+        if self.kind == TestKind::Peek {
+            self.tick_peek(dt);
+            return;
+        }
         let yaw_half = self.settings.yaw_half();
         if self.kind == TestKind::Switching {
             for (i, bot) in self.bots.iter_mut().enumerate() {
@@ -527,6 +814,8 @@ impl AimTest {
                     TestKind::Micro => "Micro",
                     TestKind::Switching => "Switching",
                     TestKind::Reflex => "Réflexes",
+                    TestKind::Peek => "Peek",
+                    TestKind::Warmup => "Échauffement",
                     _ => "Flick",
                 };
                 format!("{label} — {:.0} s  ·  {} touchées", self.flick_time_left.max(0.0).ceil(), self.stats.hits)
@@ -585,6 +874,13 @@ fn draw_bot(pos: Vec3, radius: f32, color: Color, humanoid: bool) {
 }
 
 pub fn draw_target(test: &AimTest) {
+    if test.kind == TestKind::Peek {
+        let cover = EYE + direction(test.cover_yaw, 0.0) * 7.5 + vec3(0.0, 1.4, 0.0);
+        draw_cube(cover, vec3(0.55, 3.6, 2.4), None, Color::from_rgba(48, 54, 72, 255));
+        if test.peek_out < 0.2 {
+            return;
+        }
+    }
     if test.phase == Phase::Hidden || test.phase == Phase::Done {
         return;
     }

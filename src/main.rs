@@ -7,9 +7,9 @@ mod persist;
 mod sfx;
 
 use aim::{
-    AimTest, Crosshair, DEFAULT_DURATION, DURATIONS, FLICK_TARGETS, LIFETIMES, MOTIONS, NORMAL, PRESETS, Phase,
-    SIZES, SPEEDS, Settings, Stats, TRACK_DURATION, TestKind, XHAIR_COLORS, XHAIR_GAPS, XHAIR_LENGTHS, XHAIR_THICK,
-    ZONES,
+    AimTest, Crosshair, DEFAULT_DURATION, DURATIONS, FLICK_TARGETS, LIFETIMES, MOTIONS, MissReplay, NORMAL, PRESETS,
+    Phase, SIZES, SPEEDS, Settings, Stats, TRACK_DURATION, TestKind, XHAIR_COLORS, XHAIR_GAPS, XHAIR_LENGTHS,
+    XHAIR_THICK, ZONES,
 };
 use persist::Entry;
 use sfx::Sfx;
@@ -28,6 +28,7 @@ const MENU: &[(&str, &str)] = &[
     ("Entraînement", "Flick, tracking, micro-ajustements, switching, réflexes et routine"),
     ("Historique", "L'évolution de vos scores"),
     ("Viseur", "Couleur, écart, longueur, épaisseur et point central"),
+    ("Options", "Volume des sons et inversion de l'axe vertical"),
     ("Aide", "DPI, cm/360°, eDPI : tout comprendre en une minute"),
     ("Quitter", "À bientôt !"),
 ];
@@ -38,14 +39,16 @@ const TRAIN_MENU: &[(&str, &str)] = &[
     ("Micro-ajustements", "De toutes petites corrections autour du viseur"),
     ("Switching", "Alternez rapidement entre deux cibles"),
     ("Réflexes", "Tirez dès que la cible apparaît"),
+    ("Peeks", "La cible sort d'un mur : tirez pendant qu'elle est visible"),
+    ("Échauffement", "S'arrête dès que vous retrouvez votre niveau récent"),
     ("Routine du jour", "10 minutes guidées : 5 exercices de 2 minutes"),
     ("Retour", "Revenir au menu principal"),
 ];
 
 const ROUTINE: &[TestKind] = &[TestKind::Flick, TestKind::Tracking, TestKind::Micro, TestKind::Switching, TestKind::Reflex];
 
-/// Records par mode (5), difficulté prédéfinie et durée.
-type Records = [[[f32; 4]; 4]; 5];
+/// Records par mode (flick, tracking, micro, switching, réflexes, peeks), difficulté et durée.
+type Records = [[[f32; 4]; 4]; 6];
 
 #[derive(Clone, Copy, PartialEq)]
 enum Row {
@@ -66,6 +69,8 @@ fn training_rows(kind: TestKind) -> &'static [Row] {
         TestKind::Micro => &[Row::Preset, Row::Duration, Row::Size, Row::Zone, Row::Shape],
         TestKind::Switching => &[Row::Preset, Row::Duration, Row::Size, Row::Motion, Row::Zone, Row::Shape],
         TestKind::Reflex => &[Row::Preset, Row::Duration, Row::Size, Row::Zone, Row::Shape],
+        TestKind::Peek => &[Row::Preset, Row::Duration, Row::Size, Row::Speed, Row::Shape],
+        TestKind::Warmup => &[Row::Preset, Row::Size, Row::Shape],
         _ => &[Row::Preset, Row::Duration, Row::Size, Row::Motion, Row::Lifetime, Row::Zone, Row::Shape],
     }
 }
@@ -143,12 +148,13 @@ fn record_index(kind: TestKind) -> Option<usize> {
         TestKind::Micro => Some(2),
         TestKind::Switching => Some(3),
         TestKind::Reflex => Some(4),
-        TestKind::Calibration => None,
+        TestKind::Peek => Some(5),
+        TestKind::Calibration | TestKind::Warmup => None,
     }
 }
 
 fn load_records() -> Records {
-    let mut records = [[[0.0; 4]; 4]; 5];
+    let mut records = [[[0.0; 4]; 4]; 6];
     let Ok(text) = std::fs::read_to_string(RECORDS_FILE) else {
         return records;
     };
@@ -157,7 +163,7 @@ fn load_records() -> Records {
         if let [mode, preset, duration, score] = parts[..]
             && let (Ok(mode), Ok(preset), Ok(duration), Ok(score)) =
                 (mode.parse::<usize>(), preset.parse::<usize>(), duration.parse::<usize>(), score.parse())
-            && mode < 5
+            && mode < 6
             && preset < PRESETS.len()
             && duration < DURATIONS.len()
         {
@@ -175,6 +181,8 @@ fn mode_name(kind: TestKind) -> &'static str {
         TestKind::Micro => "Micro-ajustements",
         TestKind::Switching => "Switching",
         TestKind::Reflex => "Réflexes",
+        TestKind::Peek => "Peeks",
+        TestKind::Warmup => "Échauffement",
     }
 }
 
@@ -249,6 +257,7 @@ enum Screen {
     TrainingIntro,
     TrainingResult,
     Crosshair,
+    Options,
     History,
     RoutineBrief,
     RoutineSummary,
@@ -278,6 +287,18 @@ struct App {
     xhair_row: usize,
     history: Vec<Entry>,
     history_mode: usize,
+    v_ratio: f32,
+    ads_ratio: f32,
+    invert_y: bool,
+    volume: u8,
+    options_row: usize,
+    worst_miss: Option<MissReplay>,
+    week: i64,
+    week_done: u32,
+    week_goal: u32,
+    warmup_rate: f32,
+    warmup_reached: bool,
+    last_elapsed: f32,
     in_routine: bool,
     routine_i: usize,
     routine_scores: Vec<(TestKind, f32)>,
@@ -292,6 +313,8 @@ struct App {
     field: usize,
     dpi_text: String,
     sens_text: String,
+    v_sens_text: String,
+    ads_text: String,
     fov_text: String,
     game: usize,
     error: Option<String>,
@@ -330,6 +353,18 @@ impl App {
             xhair_row: 0,
             history: persist::load_history(),
             history_mode: 0,
+            v_ratio: 1.0,
+            ads_ratio: 1.0,
+            invert_y: profile.invert_y,
+            volume: profile.volume,
+            options_row: 0,
+            worst_miss: None,
+            week: profile.week,
+            week_done: profile.week_done,
+            week_goal: profile.week_goal,
+            warmup_rate: 0.0,
+            warmup_reached: false,
+            last_elapsed: 0.0,
             in_routine: false,
             routine_i: 0,
             routine_scores: Vec::new(),
@@ -344,6 +379,8 @@ impl App {
             field: 0,
             dpi_text: profile.dpi,
             sens_text: profile.sens,
+            v_sens_text: profile.vsens,
+            ads_text: profile.ads,
             fov_text: profile.fov,
             game: profile.game.min(GAMES.len()),
             error: None,
@@ -431,6 +468,18 @@ impl App {
             self.error = Some("Le FOV horizontal doit être compris entre 60 et 130.".to_owned());
             return None;
         }
+        let vsens = parse(&self.v_sens_text).unwrap_or(1.0);
+        if !(0.1..=2.0).contains(&vsens) {
+            self.error = Some("La sensibilité verticale doit être comprise entre 0,1 et 2.".to_owned());
+            return None;
+        }
+        self.v_ratio = vsens;
+        let ads = parse(&self.ads_text).unwrap_or(1.0);
+        if !(0.1..=2.0).contains(&ads) {
+            self.error = Some("La sensibilité en visée doit être comprise entre 0,1 et 2.".to_owned());
+            return None;
+        }
+        self.ads_ratio = ads;
         let cm = match GAMES.get(self.game) {
             Some(game) => games::cm_per_360(game.yaw, sens, dpi),
             None => games::DEFAULT_CM_PER_360,
@@ -472,11 +521,84 @@ impl App {
         self.save_profile();
     }
 
+    fn spawn_test(&mut self, cm: f32) {
+        self.spawn_test_at(cm, self.mode, self.train);
+    }
+
+    fn spawn_test_at(&mut self, cm: f32, kind: TestKind, settings: Settings) {
+        if kind == TestKind::Warmup {
+            self.warmup_reached = false;
+            let rates: Vec<f32> = self
+                .history
+                .iter()
+                .filter(|entry| entry.mode == 0 && entry.duration > 1.0)
+                .rev()
+                .take(5)
+                .map(|entry| entry.score / entry.duration)
+                .collect();
+            self.warmup_rate = if rates.is_empty() { 0.0 } else { rates.iter().sum::<f32>() / rates.len() as f32 * 0.9 };
+        }
+        let deg_per_count = games::deg_per_count(cm, self.dpi);
+        self.worst_miss = None;
+        self.test = Some(AimTest::new(deg_per_count, kind, settings, self.v_ratio, self.ads_ratio, self.invert_y));
+    }
+
+    fn bump_week(&mut self) {
+        let week = persist::current_week();
+        if self.week != week {
+            self.week = week;
+            self.week_done = 0;
+        }
+        self.week_done = self.week_done.saturating_add(1);
+    }
+
+    fn cycle_goal(&mut self, delta: i32) {
+        let goals = persist::WEEK_GOALS;
+        let index = goals.iter().position(|goal| *goal == self.week_goal).unwrap_or(1);
+        self.week_goal = goals[cycle(index, goals.len(), delta)];
+        self.save_profile();
+    }
+
+    fn update_options(&mut self, escape: bool) {
+        if escape || is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter) {
+            self.sfx.set_volume(self.volume);
+            self.save_profile();
+            self.screen = Screen::MainMenu;
+            return;
+        }
+        if is_key_pressed(KeyCode::Down) || is_key_pressed(KeyCode::Tab) || is_key_pressed(KeyCode::Up) {
+            self.options_row = 1 - self.options_row;
+        }
+        let delta = if is_key_pressed(KeyCode::Right) { 1 } else if is_key_pressed(KeyCode::Left) { -1 } else { 0 };
+        if delta == 0 {
+            return;
+        }
+        if self.options_row == 0 {
+            self.invert_y = !self.invert_y;
+        } else {
+            self.volume = (self.volume as i16 + delta * 10).clamp(0, 100) as u8;
+            self.sfx.set_volume(self.volume);
+            self.sfx.hit();
+        }
+        self.save_profile();
+    }
+
+    fn view_fov(&self) -> f32 {
+        if self.test.as_ref().is_some_and(|test| test.zoomed) { self.fov / aim::ADS_ZOOM } else { self.fov }
+    }
+
     fn save_profile(&self) {
         persist::save_profile(&persist::Profile {
             dpi: self.dpi_text.clone(),
             sens: self.sens_text.clone(),
             fov: self.fov_text.clone(),
+            vsens: self.v_sens_text.clone(),
+            ads: self.ads_text.clone(),
+            invert_y: self.invert_y,
+            volume: self.volume,
+            week: self.week,
+            week_done: self.week_done,
+            week_goal: self.week_goal,
             game: self.game,
             train: self.train,
             crosshair: self.crosshair,
@@ -543,14 +665,23 @@ impl App {
             1 => self.screen = Screen::TrainMenu,
             2 => self.screen = Screen::History,
             3 => self.screen = Screen::Crosshair,
-            4 => self.open_help(),
+            4 => self.screen = Screen::Options,
+            5 => self.open_help(),
             _ => return true,
         }
         false
     }
 
     fn activate_train(&mut self, item: usize) {
-        const MODES: [TestKind; 5] = [TestKind::Flick, TestKind::Tracking, TestKind::Micro, TestKind::Switching, TestKind::Reflex];
+        const MODES: [TestKind; 7] = [
+            TestKind::Flick,
+            TestKind::Tracking,
+            TestKind::Micro,
+            TestKind::Switching,
+            TestKind::Reflex,
+            TestKind::Peek,
+            TestKind::Warmup,
+        ];
         if let Some(mode) = MODES.get(item) {
             self.mode = *mode;
             self.in_routine = false;
@@ -594,13 +725,27 @@ impl App {
         }
         self.result_settings = settings;
         self.training_result = Some(stats.clone());
-        if let Some(mode) = record_index(self.mode) {
+        self.bump_week();
+        self.save_profile();
+        let history_mode = record_index(self.mode).or(if self.mode == TestKind::Warmup { Some(6) } else { None });
+        if let Some(mode) = history_mode {
             let note = match self.mode {
                 TestKind::Tracking => format!("suivi {:.0} %", stats.tracking_pct()),
                 TestKind::Reflex => format!("réaction {:.0} ms", stats.avg_flick_ms()),
                 _ => format!("précision {:.0} %", stats.accuracy() * 100.0),
             };
-            let entry = Entry { time: miniquad::date::now(), mode, score: stats.training_score(self.mode), note };
+            let duration = if self.mode == TestKind::Warmup {
+                self.last_elapsed.max(1.0)
+            } else {
+                DURATIONS[self.result_settings.duration].1
+            };
+            let entry = Entry {
+                time: miniquad::date::now(),
+                mode,
+                score: stats.training_score(self.mode),
+                duration,
+                note,
+            };
             persist::append_history(&entry);
             self.history.push(entry);
         }
@@ -695,6 +840,12 @@ impl App {
                 if is_key_pressed(KeyCode::F1) {
                     self.open_help();
                 }
+                if is_key_pressed(KeyCode::Minus) || is_key_pressed(KeyCode::KpSubtract) {
+                    self.cycle_goal(-1);
+                }
+                if is_key_pressed(KeyCode::Equal) || is_key_pressed(KeyCode::KpAdd) {
+                    self.cycle_goal(1);
+                }
             }
             Screen::TrainMenu => {
                 if escape {
@@ -708,13 +859,14 @@ impl App {
                 }
             }
             Screen::Crosshair => self.update_crosshair(escape),
+            Screen::Options => self.update_options(escape),
             Screen::History => {
                 if escape || clicked {
                     self.screen = Screen::MainMenu;
                 } else if is_key_pressed(KeyCode::Left) {
-                    self.history_mode = cycle(self.history_mode, 5, -1);
+                    self.history_mode = cycle(self.history_mode, 7, -1);
                 } else if is_key_pressed(KeyCode::Right) {
-                    self.history_mode = cycle(self.history_mode, 5, 1);
+                    self.history_mode = cycle(self.history_mode, 7, 1);
                 }
             }
             Screen::RoutineBrief => {
@@ -722,8 +874,7 @@ impl App {
                     self.in_routine = false;
                     self.screen = Screen::MainMenu;
                 } else if clicked || is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter) {
-                    let deg_per_count = games::deg_per_count(self.train_cm, self.dpi);
-                    self.test = Some(AimTest::new(deg_per_count, self.mode, self.train));
+                    self.spawn_test(self.train_cm);
                     self.grab(true);
                     self.screen = Screen::Playing;
                 }
@@ -750,10 +901,10 @@ impl App {
                     return false;
                 }
                 if is_key_pressed(KeyCode::Down) || is_key_pressed(KeyCode::Tab) {
-                    self.field = (self.field + 1) % 4;
+                    self.field = (self.field + 1) % 6;
                 }
                 if is_key_pressed(KeyCode::Up) {
-                    self.field = (self.field + 3) % 4;
+                    self.field = (self.field + 5) % 6;
                 }
                 if self.field == 1 {
                     let choices = GAMES.len() + 1;
@@ -770,6 +921,8 @@ impl App {
                     0 => Some(&mut self.dpi_text),
                     2 if !unknown => Some(&mut self.sens_text),
                     3 => Some(&mut self.fov_text),
+                    4 => Some(&mut self.v_sens_text),
+                    5 => Some(&mut self.ads_text),
                     _ => None,
                 };
                 if let Some(text) = text {
@@ -796,7 +949,7 @@ impl App {
                     self.screen = Screen::Setup;
                 } else if clicked {
                     let cm = self.cm(self.order[self.slot]);
-                    self.test = Some(AimTest::new(games::deg_per_count(cm, self.dpi), TestKind::Calibration, self.train));
+                    self.spawn_test_at(cm, TestKind::Calibration, self.train);
                     self.grab(true);
                     self.screen = Screen::Playing;
                 }
@@ -815,8 +968,7 @@ impl App {
                 } else if is_key_pressed(KeyCode::Right) {
                     adjust_row(rows[self.train_row], &mut self.train, 1);
                 } else if clicked || is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter) {
-                    let deg_per_count = games::deg_per_count(self.train_cm, self.dpi);
-                    self.test = Some(AimTest::new(deg_per_count, self.mode, self.train));
+                    self.spawn_test(self.train_cm);
                     self.grab(true);
                     self.screen = Screen::Playing;
                 }
@@ -839,17 +991,28 @@ impl App {
                 let Some(test) = self.test.as_mut() else {
                     return false;
                 };
-                test.update(counts, clicked, dt);
+                test.update(counts, clicked, is_mouse_button_down(MouseButton::Right), dt);
                 match test.feedback {
                     aim::Feedback::Hit => self.sfx.hit(),
                     aim::Feedback::Headshot => self.sfx.head(),
                     aim::Feedback::Miss => self.sfx.miss(),
                     aim::Feedback::None => {}
                 }
+                if self.mode == TestKind::Warmup && test.phase != Phase::Done {
+                    let elapsed = test.elapsed();
+                    let rate = if elapsed > 0.0 { test.stats.click_score() / elapsed } else { 0.0 };
+                    let ready = if self.warmup_rate > 0.0 { elapsed >= 20.0 && rate >= self.warmup_rate } else { elapsed >= 45.0 };
+                    if ready {
+                        self.warmup_reached = self.warmup_rate > 0.0;
+                        test.request_finish();
+                    }
+                }
                 if test.phase == Phase::Done {
+                    self.last_elapsed = test.elapsed();
                     self.sfx.done();
                     let stats = test.stats.clone();
                     let kind = test.kind;
+                    self.worst_miss = test.worst.clone();
                     self.test = None;
                     self.grab(false);
                     if kind != TestKind::Calibration {
@@ -951,9 +1114,10 @@ impl App {
     }
 
     fn draw(&self) {
+        let fov = self.view_fov();
         match (&self.test, self.screen) {
             (Some(test), Screen::Playing | Screen::Paused) => {
-                set_camera(&aim::camera(test.yaw, test.pitch, self.fov));
+                set_camera(&aim::camera(test.yaw, test.pitch, fov));
                 aim::draw_world();
                 aim::draw_target(test);
             }
@@ -972,10 +1136,14 @@ impl App {
                 self.ui.center("PAUSE", 460.0, 80.0, WHITE_SOFT);
                 self.ui.center("Clic : reprendre  ·  Q : abandonner et revenir au menu", 540.0, 30.0, GREY);
             }
-            Screen::MainMenu => self.draw_menu("AIM CALIBRATION", "Sensibilité et entraînement pour vos jeux FPS", MENU, self.menu_sel),
+            Screen::MainMenu => {
+                self.draw_menu("AIM CALIBRATION", "Sensibilité et entraînement pour vos jeux FPS", MENU, self.menu_sel);
+                self.draw_week_bar();
+            }
             Screen::TrainMenu => self.draw_menu("ENTRAÎNEMENT", "Choisissez un exercice", TRAIN_MENU, self.train_sel),
             Screen::Setup => self.draw_setup(),
             Screen::Crosshair => self.draw_crosshair_screen(),
+            Screen::Options => self.draw_options(),
             Screen::History => self.draw_history(),
             Screen::RoutineBrief => self.draw_routine_brief(),
             Screen::RoutineSummary => self.draw_routine_summary(),
@@ -986,6 +1154,11 @@ impl App {
             Screen::Final => self.draw_final(),
             Screen::Help => self.draw_help(),
             Screen::DpiMeasure => self.draw_dpi_measure(),
+        }
+        if matches!(self.screen, Screen::Playing | Screen::Paused)
+            && let Some(test) = &self.test
+        {
+            test.draw_miss_path(fov);
         }
     }
 
@@ -1005,6 +1178,15 @@ impl App {
                 format!("Précision {:.0} %", test.stats.accuracy() * 100.0)
             }
             TestKind::Reflex if !test.stats.flick_ms.is_empty() => format!("Réaction {:.0} ms", test.stats.avg_flick_ms()),
+            TestKind::Warmup => {
+                let elapsed = test.elapsed().max(0.1);
+                let rate = test.stats.click_score() / elapsed;
+                if self.warmup_rate > 0.0 {
+                    format!("Niveau {:.0} %", (rate / self.warmup_rate * 100.0).min(150.0))
+                } else {
+                    format!("Référence dans {:.0} s", (45.0 - elapsed).max(0.0))
+                }
+            }
             TestKind::Tracking if test.stats.track_total > 0.0 => {
                 format!("Sur la cible {:.0} %", test.stats.tracking_pct())
             }
@@ -1012,7 +1194,8 @@ impl App {
         };
         let x = screen_width() - self.ui.width(&live, 28.0) - 30.0;
         self.ui.text(&live, x, 50.0, 28.0, GREY);
-        self.ui.text("Échap : pause", 30.0, 1050.0, 22.0, GREY);
+        let zoom = if test.zoomed { "Visée  ·  " } else { "" };
+        self.ui.text(&format!("{zoom}Clic droit : zoomer  ·  Échap : pause"), 30.0, 1050.0, 22.0, GREY);
     }
 
     fn draw_setup(&self) {
@@ -1041,11 +1224,13 @@ impl App {
                 if game.is_some() { self.sens_text.clone() } else { "—".to_owned() },
             ),
             ("FOV horizontal (Valorant : 103)", self.fov_text.clone()),
+            ("Sensibilité verticale (×)", self.v_sens_text.clone()),
+            ("Sensibilité en visée (×)", self.ads_text.clone()),
         ];
         let left = screen_width() / 2.0 - 520.0 * Ui::scale();
         let right = screen_width() / 2.0 + 40.0 * Ui::scale();
         for (i, (label, value)) in fields.iter().enumerate() {
-            let y = 380.0 + i as f32 * 70.0;
+            let y = 340.0 + i as f32 * 58.0;
             let selected = i == self.field;
             let color = if selected { WHITE_SOFT } else { GREY };
             if selected {
@@ -1058,7 +1243,7 @@ impl App {
                 );
             }
             ui.text(label, left, y, 32.0, color);
-            let editable = i == 0 || i == 3 || (i == 2 && game.is_some());
+            let editable = i == 0 || i >= 3 || (i == 2 && game.is_some());
             let value = if selected && editable { format!("{value}{cursor}") } else { value.clone() };
             ui.text(&value, right, y, 32.0, if selected { ACCENT } else { color });
         }
@@ -1068,7 +1253,9 @@ impl App {
             (1, _) => "Le jeu dont vous connaissez la sensibilité. Aucune idée ? Choisissez « Je ne sais pas » (← →).".to_owned(),
             (2, Some(g)) => format!("Dans {} : {}", g.name, g.settings),
             (2, None) => "Pas besoin : le test partira d'une valeur moyenne, puis s'adaptera à vous.".to_owned(),
-            _ => "L'angle de vue du jeu. Dans le doute, laissez 103 (valeur fixe de Valorant).".to_owned(),
+            (3, _) => "L'angle de vue du jeu. Dans le doute, laissez 103 (valeur fixe de Valorant).".to_owned(),
+            (4, _) => "Multiplicateur vertical, comme dans Valorant. 1 = même vitesse que l'horizontale.".to_owned(),
+            _ => "Multiplicateur quand vous visez. En jeu, maintenez le clic droit : le zoom est de ×1,5.".to_owned(),
         };
         ui.center(&hint, 670.0, 26.0, WHITE_SOFT);
 
@@ -1168,7 +1355,13 @@ impl App {
         ui.center("Votre sensibilité idéale", 150.0, 44.0, GREY);
         ui.center(&format!("{cm:.1} cm / 360°"), 250.0, 100.0, ACCENT);
         ui.center(
-            &format!("{:.1} pouces / 360°  ·  à {:.0} DPI", cm / 2.54, self.dpi),
+            &format!(
+                "{:.1} pouces / 360°  ·  {:.0} DPI  ·  vertical ×{:.2}  ·  visée ×{:.2}",
+                cm / 2.54,
+                self.dpi,
+                self.v_ratio,
+                self.ads_ratio
+            ),
             310.0,
             30.0,
             WHITE_SOFT,
@@ -1258,6 +1451,23 @@ impl App {
         );
     }
 
+    fn draw_week_bar(&self) {
+        let scale = Ui::scale();
+        let width = 460.0 * scale;
+        let height = 14.0 * scale;
+        let x = (screen_width() - width) / 2.0;
+        let y = 972.0 * scale;
+        let ratio = (self.week_done as f32 / self.week_goal.max(1) as f32).min(1.0);
+        draw_rectangle(x, y, width, height, Color::new(1.0, 1.0, 1.0, 0.08));
+        draw_rectangle(x, y, width * ratio, height, ACCENT);
+        self.ui.center(
+            &format!("Objectif de la semaine  {}/{}    ·    - / + pour le modifier", self.week_done, self.week_goal),
+            960.0,
+            22.0,
+            GREY,
+        );
+    }
+
     fn draw_crosshair_screen(&self) {
         dim(0.72);
         let ui = &self.ui;
@@ -1289,7 +1499,7 @@ impl App {
         dim(0.82);
         let ui = &self.ui;
         let s = Ui::scale();
-        let names = ["Flick", "Tracking", "Micro-ajustements", "Switching", "Réflexes"];
+        let names = ["Flick", "Tracking", "Micro-ajustements", "Switching", "Réflexes", "Peeks", "Échauffement"];
         ui.center("HISTORIQUE", 120.0, 64.0, ACCENT);
         ui.center(&format!("<  {}  >", names[self.history_mode]), 190.0, 36.0, GOLD);
 
@@ -1372,6 +1582,8 @@ impl App {
             TestKind::Micro => "Les cibles naissent près du viseur. Travaillez les petites corrections.",
             TestKind::Switching => "Seule la cible rouge vif compte : alternez entre les deux.",
             TestKind::Reflex => "Ne tirez pas trop tôt. La cible apparaît après un délai aléatoire.",
+            TestKind::Peek => "La cible dépasse du mur quelques instants. Tirez pendant qu'elle est à découvert.",
+            TestKind::Warmup => "L'exercice s'arrête dès que votre rythme retrouve vos dernières sessions de flick.",
             _ => "Éliminez un maximum de cibles rouges. Chaque tir manqué fait baisser la précision.",
         };
         ui.center(desc, 215.0, 28.0, WHITE_SOFT);
@@ -1472,11 +1684,79 @@ impl App {
                 },
             ),
         };
-        for (i, line) in lines.iter().enumerate() {
-            ui.center(line, 540.0 + i as f32 * 50.0, 32.0, WHITE_SOFT);
+        let mut lines = lines;
+        if let Some(spread) = stats.spread_ms() {
+            let label = if spread < 80.0 {
+                "très régulier"
+            } else if spread < 180.0 {
+                "correct"
+            } else {
+                "irrégulier"
+            };
+            lines.push(format!("Régularité : {label}  ·  {spread:.0} ms entre les flicks rapides et les lents"));
         }
-        ui.center(tip, 760.0, 26.0, GREY);
+        if stats.traces > 0 {
+            let tremor = if stats.avg_tremor() < 0.15 {
+                "faible"
+            } else if stats.avg_tremor() < 0.45 {
+                "présent"
+            } else {
+                "fort"
+            };
+            lines.push(format!("Dépassement de la cible : {:.1}°", stats.avg_overshoot()));
+            lines.push(format!("Tremblement en fin de geste : {tremor}"));
+            lines.push(format!("Temps d'ajustement avant le clic : {:.0} ms", stats.avg_correction()));
+        }
+        if self.mode == TestKind::Warmup {
+            let message = if self.warmup_reached {
+                "Niveau récent retrouvé : vous pouvez lancer une partie."
+            } else if self.warmup_rate == 0.0 {
+                "Pas encore de sessions de flick : celle-ci servira de référence."
+            } else {
+                "Temps maximum atteint, le niveau récent n'est pas encore là."
+            };
+            lines.push(message.to_owned());
+        }
+        for (i, line) in lines.iter().enumerate() {
+            ui.center(line, 500.0 + i as f32 * 32.0, 26.0, WHITE_SOFT);
+        }
+        ui.center(tip, 860.0, 24.0, GREY);
         ui.center("Entrée ou R : rejouer  ·  Échap : menu principal", 1020.0, 28.0, GOLD);
+        if let Some(replay) = &self.worst_miss {
+            let scale = Ui::scale();
+            let cx = screen_width() - 150.0 * scale;
+            let cy = 430.0 * scale;
+            aim::AimTest::draw_replay(replay, cx, cy, 78.0 * scale);
+            self.ui.center_at("Pire raté", cx, 430.0 - 115.0, 22.0, GOLD);
+            self.ui.center_at(&format!("{:.1}° à côté", replay.error), cx, 430.0 + 115.0, 20.0, GREY);
+        }
+    }
+
+    fn draw_options(&self) {
+        dim(0.78);
+        let ui = &self.ui;
+        ui.center("OPTIONS", 220.0, 70.0, ACCENT);
+        let volume = format!("{} %", self.volume);
+        let rows = [("Axe vertical", if self.invert_y { "Inversé" } else { "Normal" }), ("Volume des sons", volume.as_str())];
+        let left = screen_width() / 2.0 - 360.0 * Ui::scale();
+        let right = screen_width() / 2.0 + 40.0 * Ui::scale();
+        for (i, (label, value)) in rows.iter().enumerate() {
+            let y = 420.0 + i as f32 * 80.0;
+            let selected = i == self.options_row;
+            if selected {
+                draw_rectangle(left - 24.0 * Ui::scale(), (y - 48.0) * Ui::scale(), 820.0 * Ui::scale(), 64.0 * Ui::scale(), Color::new(0.0, 1.0, 0.78, 0.08));
+            }
+            let color = if selected { WHITE_SOFT } else { GREY };
+            ui.text(label, left, y, 32.0, color);
+            ui.text(&format!("<  {value}  >"), right, y, 32.0, if selected { ACCENT } else { color });
+        }
+        ui.center(
+            "Inversé : pousser la souris vers l'avant regarde vers le bas. Le volume se fait entendre tout de suite.",
+            620.0,
+            26.0,
+            GREY,
+        );
+        ui.center("↑ ↓ : réglage  ·  ← → : modifier  ·  Entrée ou Échap : retour", 1020.0, 26.0, GOLD);
     }
 
     fn draw_help(&self) {
@@ -1630,6 +1910,7 @@ fn dim(alpha: f32) {
 async fn main() {
     srand((miniquad::date::now() * 1000.0) as u64);
     let mut app = App::new(Sfx::load().await);
+    app.sfx.set_volume(app.volume);
     let mut fullscreen = true;
     loop {
         if is_key_pressed(KeyCode::F11) {

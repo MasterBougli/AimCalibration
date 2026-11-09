@@ -13,7 +13,9 @@ Rendez-vous dans l'onglet [**Releases**](https://github.com/MasterBougli/AimCali
 ## Menu principal
 
 - **Trouver ma sensibilité** : le calibrage décrit ci-dessous.
-- **Entraînement** : Flick, Tracking, Micro-ajustements, Switching, Réflexes, et une routine guidée de 10 minutes (5 × 2 min).
+- **Entraînement** : Flick, Tracking, Micro-ajustements, Switching, Réflexes, Peeks, Échauffement, et une routine guidée de 10 minutes (5 × 2 min).
+
+L'échauffement s'arrête dès que le rythme retrouve la moyenne des dernières sessions de flick. Après un exercice de clic, le résultat indique le dépassement de la cible, le tremblement en fin de geste et le temps d'ajustement avant le clic. La sensibilité verticale et la sensibilité en visée (zoom ×1,5 en maintenant le clic droit) se règlent avec le DPI et le FOV. Après un tir raté, le trajet du viseur s'affiche une seconde, avec la cible marquée en jaune. Le résultat indique aussi la régularité : l'écart entre les flicks rapides et les flicks lents. Le menu principal montre l'objectif de la semaine. Le menu Options règle le volume et permet d'inverser l'axe vertical. L'écran de résultat garde le tracé du pire tir raté de la session.
 - **Historique** : courbe de progression par exercice.
 - **Viseur** : couleur, écart, longueur, épaisseur et point central.
 - **Aide** : DPI, cm/360°, eDPI et FOV expliqués simplement.
