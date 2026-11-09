@@ -7,7 +7,7 @@ license-file = "LICENSE"
 publish = false
 
 [dependencies]
-macroquad = "0.4"
+macroquad = { version = "0.4", features = ["audio"] }
 
 [target."cfg(windows)".dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_UI_Input", "Win32_Devices_HumanInterfaceDevice", "Win32_Storage_FileSystem", "Win32_Security"] }

@@ -1,0 +1,115 @@
+//! Réglages et historique, dans des fichiers texte à côté de l'exécutable.
+
+use crate::aim::{Crosshair, Settings, DEFAULT_DURATION, DURATIONS, NORMAL};
+
+pub const PROFILE_FILE: &str = "reglages.txt";
+pub const HISTORY_FILE: &str = "historique.txt";
+
+pub struct Profile {
+    pub dpi: String,
+    pub sens: String,
+    pub fov: String,
+    pub game: usize,
+    pub train: Settings,
+    pub crosshair: Crosshair,
+}
+
+impl Default for Profile {
+    fn default() -> Self {
+        Self {
+            dpi: "800".to_owned(),
+            sens: "0.35".to_owned(),
+            fov: "103".to_owned(),
+            game: 0,
+            train: Settings::preset(NORMAL, DEFAULT_DURATION),
+            crosshair: Crosshair::default(),
+        }
+    }
+}
+
+pub struct Entry {
+    pub time: f64,
+    pub mode: usize,
+    pub score: f32,
+    pub note: String,
+}
+
+fn value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    text.lines().find_map(|line| line.strip_prefix(key)?.strip_prefix('=').map(str::trim))
+}
+
+fn number(text: &str, key: &str, default: usize, max: usize) -> usize {
+    value(text, key).and_then(|v| v.parse().ok()).filter(|v| *v < max).unwrap_or(default)
+}
+
+pub fn load_profile() -> Profile {
+    let Ok(text) = std::fs::read_to_string(PROFILE_FILE) else {
+        return Profile::default();
+    };
+    let fallback = Profile::default();
+    let train = Settings {
+        size: number(&text, "size", fallback.train.size, 5),
+        speed: number(&text, "speed", fallback.train.speed, 4),
+        motion: number(&text, "motion", fallback.train.motion, 3),
+        lifetime: number(&text, "lifetime", fallback.train.lifetime, 4),
+        zone: number(&text, "zone", fallback.train.zone, 3),
+        vertical: value(&text, "vertical").is_some_and(|v| v == "1"),
+        duration: number(&text, "duration", fallback.train.duration, DURATIONS.len()),
+        humanoid: value(&text, "humanoid").is_some_and(|v| v == "1"),
+    };
+    Profile {
+        dpi: value(&text, "dpi").unwrap_or(&fallback.dpi).to_owned(),
+        sens: value(&text, "sens").unwrap_or(&fallback.sens).to_owned(),
+        fov: value(&text, "fov").unwrap_or(&fallback.fov).to_owned(),
+        game: value(&text, "game").and_then(|v| v.parse().ok()).unwrap_or(0),
+        crosshair: Crosshair {
+            color: number(&text, "x_color", 0, 6),
+            gap: number(&text, "x_gap", 1, 4),
+            length: number(&text, "x_length", 1, 3),
+            thick: number(&text, "x_thick", 1, 3),
+            dot: value(&text, "x_dot").is_none_or(|v| v == "1"),
+        },
+        train,
+    }
+}
+
+pub fn save_profile(profile: &Profile) {
+    let Settings { size, speed, motion, lifetime, zone, vertical, duration, humanoid } = profile.train;
+    let Crosshair { color, gap, length, thick, dot } = profile.crosshair;
+    let text = format!(
+        "dpi={}\nsens={}\nfov={}\ngame={}\nsize={size}\nspeed={speed}\nmotion={motion}\nlifetime={lifetime}\nzone={zone}\nvertical={}\nduration={duration}\nhumanoid={}\nx_color={color}\nx_gap={gap}\nx_length={length}\nx_thick={thick}\nx_dot={}\n",
+        profile.dpi,
+        profile.sens,
+        profile.fov,
+        profile.game,
+        if vertical { "1" } else { "0" },
+        if humanoid { "1" } else { "0" },
+        if dot { "1" } else { "0" },
+    );
+    let _ = std::fs::write(PROFILE_FILE, text);
+}
+
+pub fn load_history() -> Vec<Entry> {
+    let Ok(text) = std::fs::read_to_string(HISTORY_FILE) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(4, ' ');
+            let time = parts.next()?.parse().ok()?;
+            let mode = parts.next()?.parse().ok()?;
+            let score = parts.next()?.parse().ok()?;
+            Some(Entry { time, mode, score, note: parts.next().unwrap_or("").replace('_', " ") })
+        })
+        .filter(|entry| entry.mode < 5 && entry.score.is_finite())
+        .collect()
+}
+
+pub fn append_history(entry: &Entry) {
+    let line = format!("{} {} {} {}\n", entry.time, entry.mode, entry.score, entry.note.replace(' ', "_"));
+    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(HISTORY_FILE);
+    if let Ok(file) = file.as_mut() {
+        use std::io::Write;
+        let _ = file.write_all(line.as_bytes());
+    }
+}

@@ -37,6 +37,9 @@ Aim Calibration utilise les bibliothèques open source suivantes. Elles restent 
 | cfg-if | 1.0.5 | MIT OR Apache-2.0 |
 | autocfg | 1.5.1 | MIT OR Apache-2.0 |
 | libc | 0.2.191 | MIT OR Apache-2.0 |
+| quad-snd | 0.2.8 | MIT OR Apache-2.0 |
+| lewton | 0.9.4 | MIT OR Apache-2.0 |
+| ogg | 0.7.1 | BSD-3-Clause |
 
 La police d'affichage (Segoe UI) n'est pas incluse : elle est chargée depuis l'installation de Windows de l'utilisateur.
 
@@ -61,6 +64,10 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## Licence BSD-3-Clause
+
+La bibliothèque `ogg` est sous licence BSD à 3 clauses : redistribution autorisée à condition de conserver la notice de copyright, de reproduire cette notice dans la documentation, et de ne pas utiliser le nom des auteurs pour promouvoir un produit dérivé sans autorisation écrite. Le logiciel est fourni sans garantie.
 
 ## Licence Zlib
 

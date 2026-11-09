@@ -1,3 +1,6 @@
 /target
 *.exe
 resultats_sensibilite.txt
+records_entrainement.txt
+reglages.txt
+historique.txt

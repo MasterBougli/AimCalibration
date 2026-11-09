@@ -10,7 +10,31 @@ Rendez-vous dans l'onglet [**Releases**](https://github.com/MasterBougli/AimCali
 
 > Au premier lancement, Windows SmartScreen peut afficher un avertissement, car l'exécutable n'est pas signé : cliquez sur **Informations complémentaires**, puis **Exécuter quand même**.
 
-## Comment ça marche
+## Menu principal
+
+- **Trouver ma sensibilité** : le calibrage décrit ci-dessous.
+- **Entraînement** : Flick, Tracking, Micro-ajustements, Switching, Réflexes, et une routine guidée de 10 minutes (5 × 2 min).
+- **Historique** : courbe de progression par exercice.
+- **Viseur** : couleur, écart, longueur, épaisseur et point central.
+- **Aide** : DPI, cm/360°, eDPI et FOV expliqués simplement.
+
+Les réglages (DPI, sensibilité, viseur, difficulté) sont mémorisés dans `reglages.txt`. Les scores s'ajoutent à `historique.txt`.
+
+Les exercices proposent quatre difficultés (Facile, Normal, Difficile, Expert), ou un mode **personnalisé**. Les difficultés Difficile et Expert utilisent des cibles humanoïdes : un tir à la tête compte comme un headshot. Chaque réglage s'ajuste aussi séparément :
+
+| Réglage | Flick | Tracking | Valeurs |
+| --- | --- | --- | --- |
+| Durée | ✓ | ✓ | 30 s, 60 s, 90 s, 2 min |
+| Taille des cibles | ✓ | ✓ | Très grande → Minuscule |
+| Cibles mobiles | ✓ | | Immobiles, Lentes, Rapides |
+| Durée de vie des cibles | ✓ | | Illimitée, 2 s, 1,2 s, 0,8 s |
+| Vitesse de la cible | | ✓ | Lente → Très rapide |
+| Mouvements verticaux | | ✓ | Oui, Non |
+| Zone d'apparition | ✓ | ✓ | Étroite, Normale, Large |
+
+Un record est gardé par mode, difficulté prédéfinie et durée, dans `records_entrainement.txt`. Après un calibrage, votre sensibilité idéale est pré-remplie pour vous entraîner directement avec.
+
+## Trouver sa sensibilité : comment ça marche
 
 1. **Configuration** : indiquez le DPI de votre souris, le jeu dont vous connaissez la sensibilité et sa valeur actuelle. Vous ne savez pas ? Choisissez « Je ne sais pas » et appuyez sur **M** pour détecter et mesurer votre DPI.
 2. **6 manches de test** : chaque manche compare deux sensibilités, **A** et **B**, à l'aveugle. Pour chacune, vous éliminez 12 cibles (flick), puis vous suivez une cible mobile pendant 8 secondes (tracking).
@@ -23,12 +47,12 @@ La mesure lit les déplacements bruts du capteur de la souris : l'accélération
 
 | Touche | Action |
 | --- | --- |
-| ↑ ↓ / Tab | Changer de champ |
-| ← → | Changer de jeu |
-| Entrée | Commencer |
+| ↑ ↓ / Tab / souris | Naviguer dans le menu et les champs |
+| ← → | Changer de jeu ou de difficulté |
+| Entrée / clic | Valider, commencer |
 | M | Détecter la souris et mesurer le DPI |
 | H / F1 | Aide sur les termes (DPI, cm/360°, eDPI, FOV) |
-| Échap | Pause pendant un test, retour ou quitter |
+| Échap | Pause pendant un test, retour au menu principal, quitter depuis le menu |
 | F11 | Basculer le plein écran |
 
 ## Jeux supportés
