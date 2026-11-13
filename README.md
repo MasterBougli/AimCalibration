@@ -45,9 +45,20 @@ Sur l'écran de résultat, **C** copie la ligne du jeu sélectionné (`Valorant 
 ## Trouver sa sensibilité : comment ça marche
 
 1. **Configuration** : indiquez le DPI de votre souris, le jeu dont vous connaissez la sensibilité et sa valeur actuelle. Vous ne savez pas ? Choisissez « Je ne sais pas » et appuyez sur **M** pour détecter et mesurer votre DPI.
-2. **Réglage en direct** (Entrée) : 40 secondes de flick, puis 24 secondes de tracking. La sensibilité change pendant que vous visez. Un dépassement la baisse, un viseur qui reste avant la cible la monte. Quand les corrections deviennent minuscules, le réglage est stabilisé. Le chiffre n'apparaît qu'à la fin, pour ne pas le courir.
-3. **Comparaison en manches** (touche C) : 6 manches. Chaque manche compare deux sensibilités, **A** et **B**, à l'aveugle. Pour chacune, vous éliminez 12 cibles (flick), puis vous suivez une cible mobile pendant 8 secondes (tracking). Vous gardez celle qui vous semble la plus naturelle, et l'écart est divisé par deux.
-4. **Résultat** : votre sensibilité idéale en **cm/360°**, convertie pour chaque jeu supporté, avec l'eDPI. Appuyez sur **S** pour la sauvegarder dans `resultats_sensibilite.txt`.
+2. **Réglage en direct** (Entrée) : 40 secondes de flick, puis 24 secondes de tracking en strafe. La sensibilité change pendant que vous visez. Un dépassement la baisse, un viseur qui reste avant la cible la monte. Quand les corrections deviennent minuscules, le réglage est stabilisé. Le chiffre n'apparaît qu'à la fin. Une courbe montre par où il est passé.
+3. **Confirmation à l'aveugle** : 10 cibles sur la valeur trouvée, 10 sur une valeur 12 % à côté, sans afficher laquelle est laquelle. Si vous préférez la variante, elle remplace le résultat. Échap garde la valeur trouvée.
+4. **Comparaison en manches** (touche C) : 6 manches. Chaque manche compare deux sensibilités, **A** et **B**, à l'aveugle. Pour chacune, vous éliminez 12 cibles (flick), puis vous suivez une cible mobile pendant 8 secondes (tracking). Vous gardez celle qui vous semble la plus naturelle, et l'écart est divisé par deux.
+5. **Résultat** : votre sensibilité idéale en **cm/360°**, convertie pour chaque jeu supporté, avec l'eDPI. Chaque calibrage est gardé dans l'historique (vue « Sensibilité »). Appuyez sur **S** pour la sauvegarder dans `resultats_sensibilite.txt`.
+
+Le tracking des exercices, le réglage en direct et les manches A/B suivent le même strafe : la cible inverse sa direction d'un coup.
+
+**Flick en mouvement** : le viseur dérive, puis une cible apparaît dans l'axe du mouvement. **Contre-strafe** : le tir ne compte que quand la cible s'arrête et devient verte.
+
+**Défi du jour** : les cibles sont toujours les mêmes. Le bilan compare le score à celui de la veille.
+
+Sur le résultat, **T** ouvre la liste de transfert vers le jeu. La vitesse du pointeur Windows (1 à 20) y est affichée pour League of Legends.
+
+La routine laisse 15 secondes de repos entre deux exercices. Le clic passe le repos.
 
 La mesure lit les déplacements bruts du capteur de la souris : l'accélération et la vitesse du pointeur Windows n'ont aucun effet, comme dans les vrais FPS.
 

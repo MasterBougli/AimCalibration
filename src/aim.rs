@@ -28,6 +28,12 @@ pub enum TestKind {
     Peek,
     /// Flick qui s'arrête quand le niveau récent est retrouvé.
     Warmup,
+    /// Dix cibles, pour comparer à l'aveugle la sensibilité trouvée et une variante.
+    Confirm,
+    /// Le viseur dérive, puis une cible apparaît : il faut corriger en plein mouvement.
+    Duel,
+    /// La cible strafe et s'arrête. Le tir ne compte que pendant l'arrêt.
+    Counter,
 }
 
 /// Rayon de la cible (à 12 m).
@@ -135,6 +141,8 @@ pub struct Stats {
     pub short_shots: u32,
     pub long_hits: u32,
     pub long_shots: u32,
+    /// Écart du viseur au moment du clic, en degrés : (yaw, pitch), positif = droite / haut.
+    pub impacts: Vec<(f32, f32)>,
 }
 
 impl Stats {
@@ -312,6 +320,7 @@ pub struct AimTest {
     live_on: f32,
     live_aim0: f32,
     live_tgt0: f32,
+    pub live_path: Vec<f32>,
     flick_time_left: f32,
     target_yaw: f32,
     target_pitch: f32,
@@ -339,6 +348,11 @@ pub struct AimTest {
     peek_rewarded: bool,
     ads_ratio: f32,
     invert_y: bool,
+    windup: f32,
+    windup_vel: f32,
+    target_ready: bool,
+    pub stopped: bool,
+    stop_in: f32,
     miss_path: Vec<(f32, f32)>,
     miss_target: (f32, f32),
     miss_until: f64,
@@ -348,7 +362,7 @@ impl AimTest {
     /// Le calibrage ignore `settings` et utilise toujours la difficulté Normale.
     /// `v_ratio` : multiplicateur vertical. `ads_ratio` : multiplicateur en visée (clic droit).
     pub fn new(deg_per_count: f32, kind: TestKind, settings: Settings, v_ratio: f32, ads_ratio: f32, invert_y: bool) -> Self {
-        let settings = if matches!(kind, TestKind::Calibration | TestKind::Live) {
+        let settings = if matches!(kind, TestKind::Calibration | TestKind::Live | TestKind::Confirm) {
             Settings::preset(NORMAL, DEFAULT_DURATION)
         } else {
             settings
@@ -379,6 +393,7 @@ impl AimTest {
             live_on: 0.0,
             live_aim0: 0.0,
             live_tgt0: 0.0,
+            live_path: Vec::new(),
             flick_time_left: if kind == TestKind::Live { 40.0 } else { settings.duration_secs() },
             target_yaw: 0.0,
             target_pitch: 0.0,
@@ -414,6 +429,11 @@ impl AimTest {
             peek_rewarded: false,
             ads_ratio: ads_ratio.clamp(0.1, 2.0),
             invert_y,
+            windup: 0.0,
+            windup_vel: 0.0,
+            target_ready: true,
+            stopped: false,
+            stop_in: 0.5,
             miss_path: Vec::new(),
             miss_target: (0.0, 0.0),
             miss_until: 0.0,
@@ -421,12 +441,21 @@ impl AimTest {
         if kind == TestKind::Warmup {
             test.flick_time_left = 180.0;
         }
+        if kind == TestKind::Confirm {
+            test.flick_left = 10;
+            test.flick_time_left = 45.0;
+        }
+        if kind == TestKind::Live {
+            test.live_path.push(1.0);
+        }
         match kind {
             TestKind::Tracking => test.start_tracking(),
             TestKind::Reflex => test.begin_reflex_wait(),
             TestKind::Switching => test.spawn_switch(),
             TestKind::Micro => test.spawn_micro(),
             TestKind::Peek => test.phase = Phase::Flick,
+            TestKind::Duel => test.begin_duel(),
+            TestKind::Counter => test.begin_counter(),
             _ => test.spawn_flick(),
         }
         test
@@ -448,7 +477,7 @@ impl AimTest {
     fn timed_drill(&self) -> bool {
         matches!(
             self.kind,
-            TestKind::Flick | TestKind::Micro | TestKind::Switching | TestKind::Reflex | TestKind::Peek | TestKind::Warmup
+            TestKind::Flick | TestKind::Micro | TestKind::Switching | TestKind::Reflex | TestKind::Peek | TestKind::Warmup | TestKind::Duel | TestKind::Counter
         )
     }
 
@@ -467,6 +496,67 @@ impl AimTest {
         self.live_on = 0.0;
         self.live_aim0 = self.yaw;
         self.live_tgt0 = 0.0;
+        if self.strafe_track() {
+            let mult = SPEEDS[self.settings.speed].1;
+            self.track_vel = 34.0 * mult * Self::random_sign();
+            self.track_switch_in = gen_range(0.28, 0.55);
+            self.target_pitch = 5.0;
+        }
+    }
+
+    fn strafe_track(&self) -> bool {
+        matches!(self.kind, TestKind::Tracking | TestKind::Live | TestKind::Calibration)
+    }
+
+    fn begin_duel(&mut self) {
+        self.phase = Phase::Flick;
+        self.target_ready = false;
+        self.windup = gen_range(0.35, 0.65);
+        self.windup_vel = gen_range(32.0, 62.0) * Self::random_sign();
+        self.target_spawn = get_time();
+    }
+
+    fn release_duel_target(&mut self) {
+        let half = self.settings.yaw_half();
+        let ahead = self.windup_vel.signum() * gen_range(8.0, 22.0);
+        self.target_yaw = (self.yaw + ahead).clamp(-half, half);
+        self.target_pitch = (self.pitch + gen_range(-6.0, 8.0)).clamp(-20.0, 28.0);
+        self.target_ready = true;
+        self.target_spawn = get_time();
+        self.drift_vel = 0.0;
+        self.begin_trace();
+    }
+
+    fn begin_counter(&mut self) {
+        self.spawn_flick();
+        self.stopped = false;
+        let mult = SPEEDS[self.settings.speed].1;
+        self.drift_vel = 28.0 * mult * Self::random_sign();
+        self.stop_in = gen_range(0.4, 0.8);
+    }
+
+    fn tick_counter(&mut self, dt: f32) {
+        self.stop_in -= dt;
+        if self.stop_in <= 0.0 {
+            self.stopped = !self.stopped;
+            if self.stopped {
+                self.stop_in = gen_range(0.32, 0.58);
+            } else {
+                let mult = SPEEDS[self.settings.speed].1;
+                self.drift_vel = 28.0 * mult * Self::random_sign();
+                self.stop_in = gen_range(0.4, 0.85);
+            }
+        }
+        if self.stopped {
+            return;
+        }
+        let yaw_half = self.settings.yaw_half() * 0.75;
+        if self.target_yaw > yaw_half {
+            self.drift_vel = -self.drift_vel.abs();
+        } else if self.target_yaw < -yaw_half {
+            self.drift_vel = self.drift_vel.abs();
+        }
+        self.target_yaw += self.drift_vel * dt;
     }
 
     fn spawn_flick(&mut self) {
@@ -567,6 +657,10 @@ impl AimTest {
     /// Enregistre un tir et renvoie `true` s'il a touché.
     fn register_shot(&mut self) -> bool {
         self.stats.shots += 1;
+        if self.kind == TestKind::Counter && !self.stopped {
+            self.feedback = Feedback::Miss;
+            return false;
+        }
         match self.classify(self.target_pos()) {
             Hit::Head => {
                 self.stats.hits += 1;
@@ -591,6 +685,10 @@ impl AimTest {
         self.stats.bias_yaw += self.yaw - ty;
         self.stats.bias_pitch += self.pitch - tp;
         self.stats.bias_n += 1;
+        self.stats.impacts.push((self.yaw - ty, self.pitch - tp));
+        if self.stats.impacts.len() > 80 {
+            self.stats.impacts.drain(0..20);
+        }
         if self.flick_span < 8.0 {
             self.stats.short_shots += 1;
             if hit {
@@ -626,42 +724,54 @@ impl AimTest {
                 }
             }
             Phase::Flick => {
-                let peek_hidden = self.kind == TestKind::Peek && self.peek_out < 0.55;
-                if shot && peek_hidden {
-                    self.stats.shots += 1;
-                    self.feedback = Feedback::Miss;
-                } else if shot {
-                    let hit = self.register_shot();
-                    self.note_aim(hit);
-                    if !hit {
-                        self.remember_miss();
+                let duel_windup = self.kind == TestKind::Duel && !self.target_ready;
+                if duel_windup {
+                    self.yaw += self.windup_vel * dt;
+                    self.windup -= dt;
+                    if self.windup <= 0.0 {
+                        self.release_duel_target();
                     }
-                    self.analyze_trace();
-                    if self.kind == TestKind::Live && self.flick_sample {
-                        self.adapt_flick();
-                    }
-                    if hit {
-                        self.stats.flick_ms.push(((get_time() - self.target_spawn) * 1000.0) as f32);
-                        self.flick_left = self.flick_left.saturating_sub(1);
-                        match self.kind {
-                            TestKind::Calibration if self.flick_left == 0 => self.start_tracking(),
-                            TestKind::Reflex => self.begin_reflex_wait(),
-                            TestKind::Switching => {
-                                self.active = 1 - self.active;
-                                self.begin_trace();
+                } else {
+                    let peek_hidden = self.kind == TestKind::Peek && self.peek_out < 0.55;
+                    if shot && peek_hidden {
+                        self.stats.shots += 1;
+                        self.feedback = Feedback::Miss;
+                    } else if shot {
+                        let hit = self.register_shot();
+                        self.note_aim(hit);
+                        if !hit {
+                            self.remember_miss();
+                        }
+                        self.analyze_trace();
+                        if self.kind == TestKind::Live && self.flick_sample {
+                            self.adapt_flick();
+                        }
+                        if hit {
+                            self.stats.flick_ms.push(((get_time() - self.target_spawn) * 1000.0) as f32);
+                            self.flick_left = self.flick_left.saturating_sub(1);
+                            match self.kind {
+                                TestKind::Calibration if self.flick_left == 0 => self.start_tracking(),
+                                TestKind::Confirm if self.flick_left == 0 => self.phase = Phase::Done,
+                                TestKind::Reflex => self.begin_reflex_wait(),
+                                TestKind::Switching => {
+                                    self.active = 1 - self.active;
+                                    self.begin_trace();
+                                }
+                                TestKind::Micro => self.spawn_micro(),
+                                TestKind::Peek => {
+                                    self.peek_rewarded = true;
+                                    self.peek_going_out = false;
+                                }
+                                TestKind::Duel => self.begin_duel(),
+                                TestKind::Counter => self.begin_counter(),
+                                _ => self.spawn_flick(),
                             }
-                            TestKind::Micro => self.spawn_micro(),
-                            TestKind::Peek => {
-                                self.peek_rewarded = true;
-                                self.peek_going_out = false;
-                            }
-                            _ => self.spawn_flick(),
                         }
                     }
-                }
-                self.tick_targets(dt);
-                if self.kind == TestKind::Peek && self.peek_out >= 0.55 && self.trace.is_empty() {
-                    self.begin_trace();
+                    self.tick_targets(dt);
+                    if self.kind == TestKind::Peek && self.peek_out >= 0.55 && self.trace.is_empty() {
+                        self.begin_trace();
+                    }
                 }
             }
             Phase::TrackWait => {
@@ -685,31 +795,57 @@ impl AimTest {
             }
             Phase::Track => {
                 self.track_clock += dt;
-                self.track_switch_in -= dt;
-                if self.track_switch_in <= 0.0 {
+                if self.strafe_track() {
+                    self.track_switch_in -= dt;
                     let mult = SPEEDS[self.settings.speed].1;
-                    let speed = gen_range(TRACK_BASE_SPEED.0, TRACK_BASE_SPEED.1) * mult;
-                    self.track_vel = speed * Self::random_sign();
-                    self.track_pitch_vel = speed * 0.45 * gen_range(0.3f32, 1.0) * Self::random_sign();
-                    self.track_switch_in = gen_range(0.35f32, 1.1) / mult.sqrt();
-                }
-                let yaw_limit = self.settings.yaw_half() * 0.8;
-                if self.target_yaw > yaw_limit {
-                    self.track_vel = -self.track_vel.abs();
-                } else if self.target_yaw < -yaw_limit {
-                    self.track_vel = self.track_vel.abs();
-                }
-                self.target_yaw += self.track_vel * dt;
-                if self.settings.vertical {
-                    let (pitch_min, pitch_max) = self.settings.pitch_range();
-                    if self.target_pitch > pitch_max {
-                        self.track_pitch_vel = -self.track_pitch_vel.abs();
-                    } else if self.target_pitch < pitch_min.max(-2.0) {
-                        self.track_pitch_vel = self.track_pitch_vel.abs();
+                    let speed = 34.0 * mult;
+                    if self.track_vel.abs() < 1.0 {
+                        self.track_vel = speed * Self::random_sign();
                     }
-                    self.target_pitch += self.track_pitch_vel * dt;
+                    if self.track_switch_in <= 0.0 {
+                        self.track_vel = -self.track_vel.signum() * speed;
+                        self.track_switch_in = gen_range(0.28, 0.62);
+                        if self.settings.vertical && gen_range(0.0f32, 1.0) < 0.35 {
+                            let (pitch_min, pitch_max) = self.settings.pitch_range();
+                            self.target_pitch = (self.target_pitch + gen_range(-4.0, 4.0)).clamp(pitch_min, pitch_max);
+                        }
+                    }
+                    let yaw_limit = self.settings.yaw_half() * 0.8;
+                    if self.target_yaw > yaw_limit {
+                        self.track_vel = -speed;
+                        self.track_switch_in = gen_range(0.28, 0.5);
+                    } else if self.target_yaw < -yaw_limit {
+                        self.track_vel = speed;
+                        self.track_switch_in = gen_range(0.28, 0.5);
+                    }
+                    self.target_yaw += self.track_vel * dt;
                 } else {
-                    self.target_pitch = 5.0 + 3.0 * (self.track_clock * 1.7).sin();
+                    self.track_switch_in -= dt;
+                    if self.track_switch_in <= 0.0 {
+                        let mult = SPEEDS[self.settings.speed].1;
+                        let speed = gen_range(TRACK_BASE_SPEED.0, TRACK_BASE_SPEED.1) * mult;
+                        self.track_vel = speed * Self::random_sign();
+                        self.track_pitch_vel = speed * 0.45 * gen_range(0.3f32, 1.0) * Self::random_sign();
+                        self.track_switch_in = gen_range(0.35f32, 1.1) / mult.sqrt();
+                    }
+                    let yaw_limit = self.settings.yaw_half() * 0.8;
+                    if self.target_yaw > yaw_limit {
+                        self.track_vel = -self.track_vel.abs();
+                    } else if self.target_yaw < -yaw_limit {
+                        self.track_vel = self.track_vel.abs();
+                    }
+                    self.target_yaw += self.track_vel * dt;
+                    if self.settings.vertical {
+                        let (pitch_min, pitch_max) = self.settings.pitch_range();
+                        if self.target_pitch > pitch_max {
+                            self.track_pitch_vel = -self.track_pitch_vel.abs();
+                        } else if self.target_pitch < pitch_min.max(-2.0) {
+                            self.track_pitch_vel = self.track_pitch_vel.abs();
+                        }
+                        self.target_pitch += self.track_pitch_vel * dt;
+                    } else {
+                        self.target_pitch = 5.0 + 3.0 * (self.track_clock * 1.7).sin();
+                    }
                 }
 
                 self.stats.track_total += dt;
@@ -742,6 +878,13 @@ impl AimTest {
             if self.flick_time_left <= 0.0 {
                 self.track_left = 24.0;
                 self.start_tracking();
+            }
+        }
+
+        if self.kind == TestKind::Confirm && self.phase == Phase::Flick {
+            self.flick_time_left -= dt;
+            if self.flick_time_left <= 0.0 {
+                self.phase = Phase::Done;
             }
         }
 
@@ -805,6 +948,32 @@ impl AimTest {
         }
     }
 
+    /// Nuage des clics autour de la cible, au centre du cadre.
+    pub fn draw_cloud(points: &[(f32, f32)], cx: f32, cy: f32, radius: f32) {
+        let mut reach = 4.0f32;
+        for &(yaw, pitch) in points {
+            reach = reach.max((yaw * yaw + pitch * pitch).sqrt());
+        }
+        reach = reach.min(18.0);
+        let scale = radius / reach;
+        draw_rectangle(cx - radius - 18.0, cy - radius - 18.0, radius * 2.0 + 36.0, radius * 2.0 + 36.0, Color::new(0.04, 0.05, 0.07, 0.9));
+        draw_rectangle_lines(cx - radius - 18.0, cy - radius - 18.0, radius * 2.0 + 36.0, radius * 2.0 + 36.0, 1.5, Color::new(1.0, 1.0, 1.0, 0.15));
+        draw_line(cx - radius, cy, cx + radius, cy, 1.0, Color::new(1.0, 1.0, 1.0, 0.2));
+        draw_line(cx, cy - radius, cx, cy + radius, 1.0, Color::new(1.0, 1.0, 1.0, 0.2));
+        draw_circle(cx, cy, 4.0, Color::from_rgba(255, 210, 70, 255));
+        for &(yaw, pitch) in points {
+            let dist = (yaw * yaw + pitch * pitch).sqrt();
+            let color = if dist < 1.5 {
+                Color::from_rgba(80, 220, 150, 220)
+            } else if dist < 4.0 {
+                Color::from_rgba(255, 200, 80, 220)
+            } else {
+                Color::from_rgba(255, 110, 90, 220)
+            };
+            draw_circle(cx + yaw * scale, cy - pitch * scale, 3.5, color);
+        }
+    }
+
     /// Trace le chemin du viseur menant au dernier tir raté, et marque la cible.
     pub fn draw_miss_path(&self, hfov: f32) {
         if get_time() > self.miss_until || self.miss_path.len() < 2 {
@@ -843,6 +1012,9 @@ impl AimTest {
         }
         if self.live_step < 0.012 {
             self.live_locked = true;
+        }
+        if self.live_path.last().is_none_or(|value| (value - self.live_mult).abs() > 0.0008) {
+            self.live_path.push(self.live_mult);
         }
     }
 
@@ -992,6 +1164,13 @@ impl AimTest {
             self.tick_peek(dt);
             return;
         }
+        if self.kind == TestKind::Counter {
+            self.tick_counter(dt);
+            return;
+        }
+        if self.kind == TestKind::Duel && !self.target_ready {
+            return;
+        }
         let yaw_half = self.settings.yaw_half();
         if self.kind == TestKind::Switching {
             for (i, bot) in self.bots.iter_mut().enumerate() {
@@ -1022,7 +1201,15 @@ impl AimTest {
         let lifetime = LIFETIMES[self.settings.lifetime].1;
         if lifetime > 0.0 && get_time() - self.target_spawn > lifetime as f64 {
             self.stats.expired += 1;
-            if self.kind == TestKind::Micro { self.spawn_micro() } else { self.spawn_flick() }
+            if self.kind == TestKind::Micro {
+                self.spawn_micro();
+            } else if self.kind == TestKind::Duel {
+                self.begin_duel();
+            } else if self.kind == TestKind::Counter {
+                self.begin_counter();
+            } else {
+                self.spawn_flick();
+            }
         }
     }
 
@@ -1039,6 +1226,15 @@ impl AimTest {
                 self.track_left.max(0.0).ceil(),
                 if self.live_locked { "sensibilité stabilisée" } else { "la sensibilité s'ajuste" }
             ),
+            Phase::Flick if self.kind == TestKind::Duel && !self.target_ready => {
+                format!("Le viseur bouge — {:.0} s", self.flick_time_left.max(0.0).ceil())
+            }
+            Phase::Flick if self.kind == TestKind::Counter && self.stopped => {
+                format!("Immobile — tirez  ·  {:.0} s", self.flick_time_left.max(0.0).ceil())
+            }
+            Phase::Flick if self.kind == TestKind::Counter => {
+                format!("Elle bouge — attendez l'arrêt  ·  {:.0} s", self.flick_time_left.max(0.0).ceil())
+            }
             Phase::Flick if self.timed_drill() => {
                 let label = match self.kind {
                     TestKind::Micro => "Micro",
@@ -1046,9 +1242,14 @@ impl AimTest {
                     TestKind::Reflex => "Réflexes",
                     TestKind::Peek => "Peek",
                     TestKind::Warmup => "Échauffement",
+                    TestKind::Duel => "Flick en mouvement",
+                    TestKind::Counter => "Contre-strafe",
                     _ => "Flick",
                 };
                 format!("{label} — {:.0} s  ·  {} touchées", self.flick_time_left.max(0.0).ceil(), self.stats.hits)
+            }
+            Phase::Flick if self.kind == TestKind::Confirm => {
+                format!("Confirmation — {} cibles restantes", self.flick_left)
             }
             Phase::Flick => format!("Flick — {} cibles restantes", self.flick_left),
             Phase::TrackWait => "Tracking — placez le viseur sur la cible".to_owned(),
@@ -1114,6 +1315,9 @@ pub fn draw_target(test: &AimTest) {
     if test.phase == Phase::Hidden || test.phase == Phase::Done {
         return;
     }
+    if test.kind == TestKind::Duel && !test.target_ready {
+        return;
+    }
     let radius = test.target_radius();
     let humanoid = test.settings.humanoid && test.kind != TestKind::Tracking;
     if test.kind == TestKind::Switching {
@@ -1128,10 +1332,14 @@ pub fn draw_target(test: &AimTest) {
         }
         return;
     }
-    let color = match test.phase {
-        Phase::Flick => Color::from_rgba(235, 64, 72, 255),
-        _ if test.on_target => Color::from_rgba(70, 220, 120, 255),
-        _ => Color::from_rgba(245, 160, 50, 255),
+    let color = if test.kind == TestKind::Counter && test.stopped {
+        Color::from_rgba(70, 220, 140, 255)
+    } else {
+        match test.phase {
+            Phase::Flick => Color::from_rgba(235, 64, 72, 255),
+            _ if test.on_target => Color::from_rgba(70, 220, 120, 255),
+            _ => Color::from_rgba(245, 160, 50, 255),
+        }
     };
     draw_bot(test.target_pos(), radius, color, humanoid);
 }

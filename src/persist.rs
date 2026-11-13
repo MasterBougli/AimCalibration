@@ -22,6 +22,8 @@ pub struct Profile {
     pub week: i64,
     pub week_done: u32,
     pub week_goal: u32,
+    /// Cases cochées du transfert vers le jeu, une par bit.
+    pub transfer: u8,
 }
 
 /// Sensibilité, FOV et multiplicateurs propres à un jeu.
@@ -49,6 +51,7 @@ impl Default for Profile {
             week: current_week(),
             week_done: 0,
             week_goal: 5,
+            transfer: 0,
             games: (0..crate::games::GAMES.len() + 1)
                 .map(|_| GameTune {
                     sens: "0.35".to_owned(),
@@ -112,6 +115,7 @@ pub fn load_profile() -> Profile {
         week: value(&text, "week").and_then(|v| v.parse().ok()).unwrap_or(0),
         week_done: value(&text, "week_done").and_then(|v| v.parse().ok()).unwrap_or(0),
         week_goal: value(&text, "week_goal").and_then(|v| v.parse().ok()).filter(|v| WEEK_GOALS.contains(v)).unwrap_or(5),
+        transfer: value(&text, "transfer").and_then(|v| v.parse().ok()).unwrap_or(0),
         game: value(&text, "game").and_then(|v| v.parse().ok()).unwrap_or(0),
         crosshair: Crosshair {
             color: number(&text, "x_color", 0, 6),
@@ -153,7 +157,7 @@ pub fn save_profile(profile: &Profile) {
     let Settings { size, speed, motion, lifetime, zone, vertical, duration, humanoid } = profile.train;
     let Crosshair { color, gap, length, thick, dot } = profile.crosshair;
     let text = format!(
-        "dpi={}\nsens={}\nfov={}\nvsens={}\nads={}\ninvert_y={}\nvolume={}\nweek={}\nweek_done={}\nweek_goal={}\ngame={}\nsize={size}\nspeed={speed}\nmotion={motion}\nlifetime={lifetime}\nzone={zone}\nvertical={}\nduration={duration}\nhumanoid={}\nx_color={color}\nx_gap={gap}\nx_length={length}\nx_thick={thick}\nx_dot={}\n",
+        "dpi={}\nsens={}\nfov={}\nvsens={}\nads={}\ninvert_y={}\nvolume={}\nweek={}\nweek_done={}\nweek_goal={}\ntransfer={}\ngame={}\nsize={size}\nspeed={speed}\nmotion={motion}\nlifetime={lifetime}\nzone={zone}\nvertical={}\nduration={duration}\nhumanoid={}\nx_color={color}\nx_gap={gap}\nx_length={length}\nx_thick={thick}\nx_dot={}\n",
         profile.dpi,
         profile.sens,
         profile.fov,
@@ -164,6 +168,7 @@ pub fn save_profile(profile: &Profile) {
         profile.week,
         profile.week_done,
         profile.week_goal,
+        profile.transfer,
         profile.game,
         if vertical { "1" } else { "0" },
         if humanoid { "1" } else { "0" },
@@ -196,7 +201,7 @@ pub fn load_history() -> Vec<Entry> {
             };
             Some(Entry { time, mode, score, duration, note })
         })
-        .filter(|entry| entry.mode < 7 && entry.score.is_finite())
+        .filter(|entry| entry.mode < 10 && entry.score.is_finite())
         .collect()
 }
 
@@ -209,5 +214,34 @@ pub fn append_history(entry: &Entry) {
     if let Ok(file) = file.as_mut() {
         use std::io::Write;
         let _ = file.write_all(line.as_bytes());
+    }
+}
+
+pub const SENS_HISTORY_FILE: &str = "historique_sensibilite.txt";
+
+pub struct SensEntry {
+    pub time: f64,
+    pub cm: f32,
+}
+
+pub fn load_sens_history() -> Vec<SensEntry> {
+    let Ok(text) = std::fs::read_to_string(SENS_HISTORY_FILE) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let time = parts.next()?.parse().ok()?;
+            let cm = parts.next()?.parse().ok()?;
+            (1.0..300.0).contains(&cm).then_some(SensEntry { time, cm })
+        })
+        .collect()
+}
+
+pub fn append_sens(entry: &SensEntry) {
+    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(SENS_HISTORY_FILE);
+    if let Ok(file) = file.as_mut() {
+        use std::io::Write;
+        let _ = file.write_all(format!("{} {}\n", entry.time, entry.cm).as_bytes());
     }
 }

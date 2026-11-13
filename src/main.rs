@@ -27,7 +27,7 @@ const RECORDS_FILE: &str = "records_entrainement.txt";
 const MENU: &[(&str, &str)] = &[
     ("Trouver ma sensibilité", "La sensibilité change pendant le flick et le tracking, jusqu'à la bonne"),
     ("Entraînement", "Flick, tracking, micro-ajustements, switching, réflexes et routine"),
-    ("Historique", "L'évolution de vos scores"),
+    ("Historique", "Scores et sensibilités trouvées au fil du temps"),
     ("Viseur", "Couleur, écart, longueur, épaisseur et point central"),
     ("Options", "Volume des sons et inversion de l'axe vertical"),
     ("Aide", "DPI, cm/360°, eDPI : tout comprendre en une minute"),
@@ -36,20 +36,23 @@ const MENU: &[(&str, &str)] = &[
 
 const TRAIN_MENU: &[(&str, &str)] = &[
     ("Flick", "De grands mouvements pour éliminer des cibles éloignées"),
-    ("Tracking", "Gardez le viseur sur une cible qui se déplace"),
+    ("Tracking", "La cible strafe : elle change de direction d'un coup"),
     ("Micro-ajustements", "De toutes petites corrections autour du viseur"),
     ("Switching", "Alternez rapidement entre deux cibles"),
     ("Réflexes", "Tirez dès que la cible apparaît"),
     ("Peeks", "La cible sort d'un mur : tirez pendant qu'elle est visible"),
+    ("Flick en mouvement", "Le viseur dérive, puis une cible apparaît"),
+    ("Contre-strafe", "La cible s'arrête net : tirez seulement à ce moment"),
+    ("Défi du jour", "Les mêmes cibles chaque jour, pour comparer à hier"),
     ("Échauffement", "S'arrête dès que vous retrouvez votre niveau récent"),
-    ("Routine du jour", "10 minutes : flick, puis vos deux exercices les plus faibles"),
+    ("Routine du jour", "10 minutes : flick, vos points faibles, et 15 s de repos entre chaque"),
     ("Retour", "Revenir au menu principal"),
 ];
 
 const ROUTINE: &[TestKind] = &[TestKind::Flick, TestKind::Tracking, TestKind::Micro, TestKind::Switching, TestKind::Reflex];
 
-/// Records par mode (flick, tracking, micro, switching, réflexes, peeks), difficulté et durée.
-type Records = [[[f32; 4]; 4]; 6];
+/// Records par mode, difficulté et durée. Modes 6 et 7 : flick en mouvement, contre-strafe.
+type Records = [[[f32; 4]; 4]; 8];
 
 #[derive(Clone, Copy, PartialEq)]
 enum Row {
@@ -150,12 +153,23 @@ fn record_index(kind: TestKind) -> Option<usize> {
         TestKind::Switching => Some(3),
         TestKind::Reflex => Some(4),
         TestKind::Peek => Some(5),
-        TestKind::Calibration | TestKind::Warmup | TestKind::Live => None,
+        TestKind::Duel => Some(6),
+        TestKind::Counter => Some(7),
+        TestKind::Calibration | TestKind::Warmup | TestKind::Live | TestKind::Confirm => None,
+    }
+}
+
+fn history_index(kind: TestKind) -> Option<usize> {
+    match kind {
+        TestKind::Warmup => Some(6),
+        TestKind::Duel => Some(7),
+        TestKind::Counter => Some(8),
+        _ => record_index(kind),
     }
 }
 
 fn load_records() -> Records {
-    let mut records = [[[0.0; 4]; 4]; 6];
+    let mut records = [[[0.0; 4]; 4]; 8];
     let Ok(text) = std::fs::read_to_string(RECORDS_FILE) else {
         return records;
     };
@@ -164,7 +178,7 @@ fn load_records() -> Records {
         if let [mode, preset, duration, score] = parts[..]
             && let (Ok(mode), Ok(preset), Ok(duration), Ok(score)) =
                 (mode.parse::<usize>(), preset.parse::<usize>(), duration.parse::<usize>(), score.parse())
-            && mode < 6
+            && mode < 8
             && preset < PRESETS.len()
             && duration < DURATIONS.len()
         {
@@ -185,6 +199,9 @@ fn mode_name(kind: TestKind) -> &'static str {
         TestKind::Reflex => "Réflexes",
         TestKind::Peek => "Peeks",
         TestKind::Warmup => "Échauffement",
+        TestKind::Confirm => "Confirmation",
+        TestKind::Duel => "Flick en mouvement",
+        TestKind::Counter => "Contre-strafe",
     }
 }
 
@@ -262,15 +279,28 @@ enum Screen {
     Options,
     History,
     RoutineBrief,
+    RoutineRest,
     RoutineSummary,
     Intro,
     Playing,
     Paused,
     RoundResult,
+    ConfirmIntro,
+    ConfirmChoice,
     Final,
+    Transfer,
     Help,
     DpiMeasure,
 }
+
+const DAILY_SEED: u64 = 0xA11_DA17;
+
+const TRANSFER_STEPS: [&str; 4] = [
+    "J'ai ouvert les options souris du jeu",
+    "J'ai collé la sensibilité (touche C sur le résultat)",
+    "L'accélération de la souris est désactivée dans le jeu",
+    "L'entrée brute est activée, si le jeu la propose",
+];
 
 const MEASURE_REFS: &[(&str, f32)] = &[
     ("Carte bancaire (8,56 cm)", 8.56),
@@ -306,8 +336,19 @@ struct App {
     game_tunes: Vec<persist::GameTune>,
     routine_plan: Vec<TestKind>,
     routine_focus: Vec<bool>,
+    rest_until: f64,
+    sens_history: Vec<persist::SensEntry>,
+    live_path_cm: Vec<f32>,
+    confirm_cm: [f32; 2],
+    confirm_order: [usize; 2],
+    confirm_slot: usize,
+    confirm_stats: [Option<Stats>; 2],
     last_elapsed: f32,
     in_routine: bool,
+    in_daily: bool,
+    transfer: u8,
+    transfer_row: usize,
+    pointer_speed: u32,
     routine_i: usize,
     routine_scores: Vec<(TestKind, f32)>,
     sfx: Sfx,
@@ -378,8 +419,19 @@ impl App {
             game_tunes: profile.games,
             routine_plan: Vec::new(),
             routine_focus: Vec::new(),
+            rest_until: 0.0,
+            sens_history: persist::load_sens_history(),
+            live_path_cm: Vec::new(),
+            confirm_cm: [0.0, 0.0],
+            confirm_order: [0, 1],
+            confirm_slot: 0,
+            confirm_stats: [None, None],
             last_elapsed: 0.0,
             in_routine: false,
+            in_daily: false,
+            transfer: profile.transfer,
+            transfer_row: 0,
+            pointer_speed: win::pointer_speed(),
             routine_i: 0,
             routine_scores: Vec::new(),
             sfx,
@@ -530,7 +582,13 @@ impl App {
             }
             _ => {
                 self.train_cm = cm;
-                if self.in_routine {
+                if self.in_daily {
+                    self.train = Settings::preset(NORMAL, DEFAULT_DURATION);
+                    self.mode = TestKind::Flick;
+                    self.screen = Screen::Playing;
+                    self.spawn_test(cm);
+                    self.grab(true);
+                } else if self.in_routine {
                     self.routine_i = 0;
                     self.routine_scores.clear();
                     self.build_routine();
@@ -563,6 +621,9 @@ impl App {
             self.warmup_rate = if rates.is_empty() { 0.0 } else { rates.iter().sum::<f32>() / rates.len() as f32 * 0.9 };
         }
         let deg_per_count = games::deg_per_count(cm, self.dpi);
+        if self.in_daily && kind == TestKind::Flick {
+            srand(DAILY_SEED);
+        }
         self.worst_miss = None;
         self.test = Some(AimTest::new(deg_per_count, kind, settings, self.v_ratio, self.ads_ratio, self.invert_y));
     }
@@ -686,6 +747,7 @@ impl App {
             week: self.week,
             week_done: self.week_done,
             week_goal: self.week_goal,
+            transfer: self.transfer,
             game: self.game,
             games: self.game_tunes.clone(),
             train: self.train,
@@ -761,21 +823,30 @@ impl App {
     }
 
     fn activate_train(&mut self, item: usize) {
-        const MODES: [TestKind; 7] = [
+        const MODES: [TestKind; 9] = [
             TestKind::Flick,
             TestKind::Tracking,
             TestKind::Micro,
             TestKind::Switching,
             TestKind::Reflex,
             TestKind::Peek,
+            TestKind::Duel,
+            TestKind::Counter,
             TestKind::Warmup,
         ];
+        self.in_daily = false;
         if let Some(mode) = MODES.get(item) {
             self.mode = *mode;
             self.in_routine = false;
             self.error = None;
             self.screen = Screen::Setup;
         } else if item == MODES.len() {
+            self.in_daily = true;
+            self.in_routine = false;
+            self.mode = TestKind::Flick;
+            self.error = None;
+            self.screen = Screen::Setup;
+        } else if item == MODES.len() + 1 {
             self.in_routine = true;
             self.mode = TestKind::Flick;
             self.error = None;
@@ -802,7 +873,8 @@ impl App {
         let score = stats.training_score(self.mode);
         let settings = self.train;
         self.new_record = false;
-        if let Some(best) = self.record_slot(&settings)
+        if !self.in_daily
+            && let Some(best) = self.record_slot(&settings)
             && score > *best
         {
             *best = score;
@@ -815,12 +887,16 @@ impl App {
         self.training_result = Some(stats.clone());
         self.bump_week();
         self.save_profile();
-        let history_mode = record_index(self.mode).or(if self.mode == TestKind::Warmup { Some(6) } else { None });
+        let history_mode = if self.in_daily { Some(9) } else { history_index(self.mode) };
         if let Some(mode) = history_mode {
-            let note = match self.mode {
-                TestKind::Tracking => format!("suivi {:.0} %", stats.tracking_pct()),
-                TestKind::Reflex => format!("réaction {:.0} ms", stats.avg_flick_ms()),
-                _ => format!("précision {:.0} %", stats.accuracy() * 100.0),
+            let note = if self.in_daily {
+                format!("défi · précision {:.0} %", stats.accuracy() * 100.0)
+            } else {
+                match self.mode {
+                    TestKind::Tracking => format!("suivi {:.0} %", stats.tracking_pct()),
+                    TestKind::Reflex => format!("réaction {:.0} ms", stats.avg_flick_ms()),
+                    _ => format!("précision {:.0} %", stats.accuracy() * 100.0),
+                }
             };
             let duration = if self.mode == TestKind::Warmup {
                 self.last_elapsed.max(1.0)
@@ -846,7 +922,8 @@ impl App {
             } else {
                 self.mode = self.routine_plan[self.routine_i];
                 self.train = routine_settings();
-                self.screen = Screen::RoutineBrief;
+                self.rest_until = miniquad::date::now() + 15.0;
+                self.screen = Screen::RoutineRest;
             }
         } else {
             self.screen = Screen::TrainingResult;
@@ -884,15 +961,25 @@ impl App {
             self.sens_text = format!("{sens:.3}");
             self.session_stats = None;
             self.live_note = None;
+            self.live_path_cm.clear();
             self.save_profile();
+            self.record_sens(self.cm(self.final_mult()));
             self.screen = Screen::Final;
         } else {
             self.new_round();
         }
     }
 
-    fn finish_live(&mut self, stats: Stats, mult: f32, step: f32, locked: bool) {
-        let found = self.base_cm / mult;
+    fn finish_live(&mut self, stats: Stats, mult: f32, step: f32, locked: bool, path: Vec<f32>) {
+        let start = self.base_cm;
+        self.live_path_cm = path.into_iter().map(|factor| start / factor.max(0.05)).collect();
+        let found = start / mult;
+        if self.live_path_cm.last().is_none_or(|cm| (cm - found).abs() > 0.05) {
+            self.live_path_cm.push(found);
+        }
+        if self.live_path_cm.len() == 1 {
+            self.live_path_cm.push(found);
+        }
         self.base_cm = found;
         self.lo = 1.0;
         self.hi = 1.0;
@@ -907,8 +994,60 @@ impl App {
         let sens = games::sens_for(GAMES[self.game].yaw, found, self.dpi);
         self.sens_text = format!("{sens:.3}");
         self.session_stats = Some(stats);
+        self.begin_confirm(found);
+    }
+
+    fn begin_confirm(&mut self, found: f32) {
+        let factor = if gen_range(0.0f32, 1.0) < 0.5 { 1.12 } else { 1.0 / 1.12 };
+        self.confirm_cm = [found, found * factor];
+        self.confirm_order = if gen_range(0.0f32, 1.0) < 0.5 { [0, 1] } else { [1, 0] };
+        self.confirm_slot = 0;
+        self.confirm_stats = [None, None];
+        self.screen = Screen::ConfirmIntro;
+    }
+
+    fn record_sens(&mut self, cm: f32) {
+        let entry = persist::SensEntry { time: miniquad::date::now(), cm };
+        persist::append_sens(&entry);
+        self.sens_history.push(entry);
+    }
+
+    fn settle_sens(&mut self, cm: f32) {
+        self.base_cm = cm;
+        self.lo = 1.0;
+        self.hi = 1.0;
+        if self.unknown_game() {
+            self.game = 0;
+        }
+        let sens = games::sens_for(GAMES[self.game].yaw, cm, self.dpi);
+        self.sens_text = format!("{sens:.3}");
         self.save_profile();
+        self.record_sens(cm);
         self.screen = Screen::Final;
+    }
+
+    fn skip_confirm(&mut self) {
+        if let Some(note) = &mut self.live_note {
+            note.push_str(" Confirmation passée.");
+        }
+        self.settle_sens(self.confirm_cm[0]);
+    }
+
+    fn accept_confirm(&mut self, shown: usize) {
+        let idx = self.confirm_order[shown];
+        let chosen = self.confirm_cm[idx];
+        if idx == 0 {
+            if let Some(note) = &mut self.live_note {
+                note.push_str(" Confirmée à l'aveugle.");
+            }
+        } else {
+            let faster = chosen < self.confirm_cm[0];
+            self.live_note = Some(format!(
+                "Vous avez préféré la variante, 12 % plus {}. Elle remplace le résultat.",
+                if faster { "rapide" } else { "lente" }
+            ));
+        }
+        self.settle_sens(chosen);
     }
 
     fn copy_result(&mut self) {
@@ -987,9 +1126,17 @@ impl App {
                 if escape || clicked {
                     self.screen = Screen::MainMenu;
                 } else if is_key_pressed(KeyCode::Left) {
-                    self.history_mode = cycle(self.history_mode, 7, -1);
+                    self.history_mode = cycle(self.history_mode, 11, -1);
                 } else if is_key_pressed(KeyCode::Right) {
-                    self.history_mode = cycle(self.history_mode, 7, 1);
+                    self.history_mode = cycle(self.history_mode, 11, 1);
+                }
+            }
+            Screen::RoutineRest => {
+                if escape {
+                    self.in_routine = false;
+                    self.screen = Screen::MainMenu;
+                } else if clicked || is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter) || miniquad::date::now() >= self.rest_until {
+                    self.screen = Screen::RoutineBrief;
                 }
             }
             Screen::RoutineBrief => {
@@ -1011,6 +1158,7 @@ impl App {
                 if escape {
                     self.save_profile();
                     self.in_routine = false;
+                    self.in_daily = false;
                     self.screen = Screen::MainMenu;
                     return false;
                 }
@@ -1104,9 +1252,18 @@ impl App {
             }
             Screen::TrainingResult => {
                 if escape {
+                    self.in_daily = false;
                     self.screen = Screen::MainMenu;
                 } else if is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter) || chars.contains(&'r') {
-                    self.screen = Screen::TrainingIntro;
+                    if self.in_daily {
+                        self.train = Settings::preset(NORMAL, DEFAULT_DURATION);
+                        self.mode = TestKind::Flick;
+                        self.spawn_test(self.train_cm);
+                        self.grab(true);
+                        self.screen = Screen::Playing;
+                    } else {
+                        self.screen = Screen::TrainingIntro;
+                    }
                 }
             }
             Screen::Playing => {
@@ -1142,11 +1299,22 @@ impl App {
                     let stats = test.stats.clone();
                     let kind = test.kind;
                     let live = (test.live_mult, test.live_step, test.live_locked);
+                    let path = test.live_path.clone();
                     self.worst_miss = test.worst.clone();
                     self.test = None;
                     self.grab(false);
                     if kind == TestKind::Live {
-                        self.finish_live(stats, live.0, live.1, live.2);
+                        self.finish_live(stats, live.0, live.1, live.2, path);
+                        return false;
+                    }
+                    if kind == TestKind::Confirm {
+                        self.confirm_stats[self.confirm_slot] = Some(stats);
+                        if self.confirm_slot == 0 {
+                            self.confirm_slot = 1;
+                            self.screen = Screen::ConfirmIntro;
+                        } else {
+                            self.screen = Screen::ConfirmChoice;
+                        }
                         return false;
                     }
                     if kind != TestKind::Calibration {
@@ -1183,11 +1351,33 @@ impl App {
                     self.screen = Screen::MainMenu;
                 }
             }
+            Screen::ConfirmIntro => {
+                if escape {
+                    self.skip_confirm();
+                } else if clicked || is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter) {
+                    let cm = self.confirm_cm[self.confirm_order[self.confirm_slot]];
+                    self.spawn_test_at(cm, TestKind::Confirm, self.train);
+                    self.grab(true);
+                    self.screen = Screen::Playing;
+                }
+            }
+            Screen::ConfirmChoice => {
+                if chars.contains(&'a') || is_key_pressed(KeyCode::Left) {
+                    self.accept_confirm(0);
+                } else if chars.contains(&'b') || is_key_pressed(KeyCode::Right) {
+                    self.accept_confirm(1);
+                } else if escape {
+                    self.skip_confirm();
+                }
+            }
             Screen::Final => {
                 if chars.contains(&'s') {
                     self.save();
                 } else if chars.contains(&'c') {
                     self.copy_result();
+                } else if chars.contains(&'t') {
+                    self.transfer_row = 0;
+                    self.screen = Screen::Transfer;
                 } else if chars.contains(&'r') {
                     self.notice = None;
                     self.screen = Screen::Setup;
@@ -1196,6 +1386,7 @@ impl App {
                     self.screen = Screen::MainMenu;
                 }
             }
+            Screen::Transfer => self.update_transfer(&chars, escape),
             Screen::Help => {
                 if escape || clicked || is_key_pressed(KeyCode::F1) || is_key_pressed(KeyCode::Enter) {
                     self.screen = self.help_return;
@@ -1204,6 +1395,30 @@ impl App {
             Screen::DpiMeasure => self.update_dpi_measure(&chars, escape),
         }
         false
+    }
+
+    fn update_transfer(&mut self, chars: &[char], escape: bool) {
+        if escape || is_key_pressed(KeyCode::Enter) && chars.is_empty() {
+            self.save_profile();
+            self.screen = Screen::Final;
+            return;
+        }
+        if is_key_pressed(KeyCode::Down) || is_key_pressed(KeyCode::Tab) {
+            self.transfer_row = (self.transfer_row + 1) % TRANSFER_STEPS.len();
+        }
+        if is_key_pressed(KeyCode::Up) {
+            self.transfer_row = (self.transfer_row + TRANSFER_STEPS.len() - 1) % TRANSFER_STEPS.len();
+        }
+        let digit = chars.iter().find_map(|c| c.to_digit(10)).map(|n| n as usize);
+        let toggle = chars.contains(&' ') || is_key_pressed(KeyCode::Right) || is_key_pressed(KeyCode::Left);
+        if let Some(n) = digit.filter(|n| (1..=TRANSFER_STEPS.len()).contains(n)) {
+            self.transfer ^= 1 << (n - 1);
+            self.transfer_row = n - 1;
+            self.save_profile();
+        } else if toggle {
+            self.transfer ^= 1 << self.transfer_row;
+            self.save_profile();
+        }
     }
 
     fn update_dpi_measure(&mut self, chars: &[char], escape: bool) {
@@ -1290,12 +1505,16 @@ impl App {
             Screen::Options => self.draw_options(),
             Screen::History => self.draw_history(),
             Screen::RoutineBrief => self.draw_routine_brief(),
+            Screen::RoutineRest => self.draw_routine_rest(),
             Screen::RoutineSummary => self.draw_routine_summary(),
             Screen::TrainingIntro => self.draw_training_intro(),
             Screen::TrainingResult => self.draw_training_result(),
             Screen::Intro => self.draw_intro(),
             Screen::RoundResult => self.draw_round_result(),
+            Screen::ConfirmIntro => self.draw_confirm_intro(),
+            Screen::ConfirmChoice => self.draw_confirm_choice(),
             Screen::Final => self.draw_final(),
+            Screen::Transfer => self.draw_transfer(),
             Screen::Help => self.draw_help(),
             Screen::DpiMeasure => self.draw_dpi_measure(),
         }
@@ -1314,6 +1533,7 @@ impl App {
                 format!("Manche {}/{}  ·  Sensibilité {}", self.round + 1, ROUNDS, slot_name(self.slot))
             }
             TestKind::Live => "Réglage en direct  ·  visez normalement, sans regarder les chiffres".to_owned(),
+            TestKind::Confirm => format!("Confirmation  ·  Sensibilité {}", slot_name(self.confirm_slot)),
             kind => format!("{}  ·  {}", mode_name(kind), settings_summary(&self.train)),
         };
         self.ui.text(&label, 30.0, 50.0, 28.0, GREY);
@@ -1499,6 +1719,45 @@ impl App {
         );
     }
 
+    fn draw_confirm_intro(&self) {
+        dim(0.7);
+        let ui = &self.ui;
+        ui.center("Confirmation à l'aveugle", 300.0, 48.0, GREY);
+        ui.center(&format!("Sensibilité {}", slot_name(self.confirm_slot)), 430.0, 90.0, ACCENT);
+        ui.center("10 cibles. Vous ne voyez pas le chiffre.", 540.0, 32.0, WHITE_SOFT);
+        ui.center("Ensuite vous direz laquelle des deux était la plus naturelle.", 590.0, 28.0, GREY);
+        ui.center("Cliquez pour commencer", 720.0, 36.0, GOLD);
+        ui.center("Échap : garder le réglage trouvé, sans confirmer", 1020.0, 24.0, GREY);
+    }
+
+    fn draw_confirm_choice(&self) {
+        dim(0.75);
+        let ui = &self.ui;
+        ui.center("Laquelle était la plus naturelle ?", 180.0, 48.0, WHITE_SOFT);
+        for slot in 0..2 {
+            let stats = self.confirm_stats[slot].as_ref();
+            let cx = screen_width() / 2.0 + (slot as f32 * 2.0 - 1.0) * 360.0 * Ui::scale();
+            ui.center_at(&format!("Sensibilité {}", slot_name(slot)), cx, 340.0, 56.0, ACCENT);
+            let accuracy = stats.map(|item| item.accuracy() * 100.0).unwrap_or(0.0);
+            let time = stats.map(|item| item.avg_flick_ms()).unwrap_or(0.0);
+            ui.center_at(&format!("Précision : {accuracy:.0} %"), cx, 430.0, 28.0, GREY);
+            ui.center_at(&format!("Temps moyen : {time:.0} ms"), cx, 476.0, 28.0, GREY);
+        }
+        ui.center("Le score ne dit pas laquelle est la bonne. Fiez-vous au ressenti.", 700.0, 26.0, GREY);
+        ui.center("A ou ← : garder A  ·  B ou → : garder B  ·  Échap : garder le réglage trouvé", 800.0, 28.0, GOLD);
+    }
+
+    fn draw_routine_rest(&self) {
+        dim(0.72);
+        let ui = &self.ui;
+        let left = (self.rest_until - miniquad::date::now()).max(0.0).ceil();
+        ui.center("Repos", 380.0, 80.0, ACCENT);
+        ui.center(&format!("{left:.0} s"), 500.0, 100.0, WHITE_SOFT);
+        ui.center("La suite arrive. La fatigue du dernier exercice ne doit pas fausser le suivant.", 640.0, 28.0, GREY);
+        ui.center(mode_name(self.mode), 720.0, 36.0, GOLD);
+        ui.center("Clic ou Entrée : passer  ·  Échap : abandonner la routine", 1020.0, 24.0, GREY);
+    }
+
     fn draw_final(&self) {
         dim(0.8);
         let ui = &self.ui;
@@ -1521,7 +1780,18 @@ impl App {
         if let Some(note) = &self.live_note {
             ui.center(note, 352.0, 24.0, GOLD);
         }
+        self.draw_live_path();
         let mut games_top = 400.0;
+        if self.sens_history.len() >= 2 {
+            let prev = &self.sens_history[self.sens_history.len() - 2];
+            ui.center(
+                &format!("Précédente : {:.1} cm/360° · {}", prev.cm, ago(prev.time)),
+                games_top,
+                22.0,
+                GREY,
+            );
+            games_top += 28.0;
+        }
         if let Some(stats) = &self.session_stats {
             if let Some(line) = stats.direction_note() {
                 ui.center(&line, games_top, 24.0, WHITE_SOFT);
@@ -1556,7 +1826,10 @@ impl App {
             y += 40.0;
         }
         ui.center(
-            "League of Legends n'est pas un FPS : seul le curseur compte. Gardez la vitesse du pointeur Windows à 10/20,",
+            &format!(
+                "League of Legends n'est pas un FPS. Vitesse du pointeur Windows : {}/20. 10 est le milieu.",
+                self.pointer_speed
+            ),
             y + 10.0,
             24.0,
             GREY,
@@ -1577,7 +1850,7 @@ impl App {
             GREY,
         );
         ui.center(
-            "S : sauvegarder  ·  C : copier  ·  R : affiner  ·  Échap : menu principal",
+            "S : sauvegarder  ·  C : copier  ·  T : transfert dans le jeu  ·  R : affiner  ·  Échap : menu",
             1020.0,
             28.0,
             GOLD,
@@ -1662,13 +1935,82 @@ impl App {
         ui.center("↑ ↓ : réglage  ·  ← → : modifier  ·  Entrée ou Échap : retour", 1020.0, 26.0, GOLD);
     }
 
+    fn draw_live_path(&self) {
+        let scale = Ui::scale();
+        if self.live_path_cm.len() >= 2 {
+            let left = 56.0 * scale;
+            let base = 360.0 * scale;
+            self.ui.text("Pendant le test", 56.0, 220.0, 22.0, GREY);
+            draw_samples(&self.live_path_cm, left, base, 240.0 * scale, 90.0 * scale);
+            let first = self.live_path_cm[0];
+            let last = *self.live_path_cm.last().unwrap();
+            self.ui.text(&format!("{first:.0} → {last:.0} cm"), 56.0, 390.0, 20.0, GREY);
+        }
+        if let Some(stats) = &self.session_stats {
+            if stats.impacts.len() >= 3 {
+                let cx = 170.0 * scale;
+                let cy = 680.0 * scale;
+                aim::AimTest::draw_cloud(&stats.impacts, cx, cy, 70.0 * scale);
+                self.ui.center_at("Tirs", cx, 560.0, 22.0, GOLD);
+            }
+        }
+    }
+
+    fn draw_sens_history(&self) {
+        let ui = &self.ui;
+        let scale = Ui::scale();
+        if self.sens_history.is_empty() {
+            ui.center("Pas encore de calibrage enregistré.", 420.0, 32.0, WHITE_SOFT);
+            return;
+        }
+        let shown: Vec<f32> = self.sens_history.iter().rev().take(16).map(|entry| entry.cm).collect::<Vec<_>>().into_iter().rev().collect();
+        if shown.len() == 1 {
+            ui.center(&format!("{:.1} cm / 360°", shown[0]), 460.0, 64.0, ACCENT);
+        } else {
+            let left = screen_width() * 0.18;
+            let width = screen_width() * 0.64;
+            let base = 620.0 * scale;
+            draw_line(left, base, left + width, base, 1.0, GREY);
+            draw_samples(&shown, left, base, width, 250.0 * scale);
+            let min = shown.iter().copied().fold(f32::MAX, f32::min);
+            let max = shown.iter().copied().fold(f32::MIN, f32::max);
+            ui.center(&format!("De {min:.1} à {max:.1} cm/360°"), 680.0, 26.0, GREY);
+        }
+        for (i, entry) in self.sens_history.iter().rev().take(5).enumerate() {
+            ui.center(
+                &format!("{}   ·   {:.1} cm/360°", ago(entry.time), entry.cm),
+                760.0 + i as f32 * 36.0,
+                24.0,
+                WHITE_SOFT,
+            );
+        }
+    }
+
     fn draw_history(&self) {
         dim(0.82);
         let ui = &self.ui;
         let s = Ui::scale();
-        let names = ["Flick", "Tracking", "Micro-ajustements", "Switching", "Réflexes", "Peeks", "Échauffement"];
+        let names = [
+            "Flick",
+            "Tracking",
+            "Micro-ajustements",
+            "Switching",
+            "Réflexes",
+            "Peeks",
+            "Échauffement",
+            "Flick en mouvement",
+            "Contre-strafe",
+            "Défi du jour",
+            "Sensibilité",
+        ];
         ui.center("HISTORIQUE", 120.0, 64.0, ACCENT);
-        ui.center(&format!("<  {}  >", names[self.history_mode]), 190.0, 36.0, GOLD);
+        ui.center(&format!("<  {}  >", names[self.history_mode.min(names.len() - 1)]), 190.0, 36.0, GOLD);
+
+        if self.history_mode == names.len() - 1 {
+            self.draw_sens_history();
+            ui.center("← → : exercice  ·  Échap ou clic : retour", 1020.0, 26.0, GOLD);
+            return;
+        }
 
         let scores: Vec<&Entry> = self.history.iter().filter(|entry| entry.mode == self.history_mode).collect();
         if scores.is_empty() {
@@ -1753,6 +2095,8 @@ impl App {
             TestKind::Switching => "Seule la cible rouge vif compte : alternez entre les deux.",
             TestKind::Reflex => "Ne tirez pas trop tôt. La cible apparaît après un délai aléatoire.",
             TestKind::Peek => "La cible dépasse du mur quelques instants. Tirez pendant qu'elle est à découvert.",
+            TestKind::Duel => "Le viseur dérive tout seul, puis une cible apparaît devant le mouvement.",
+            TestKind::Counter => "Tirez seulement quand la cible devient verte : elle est alors immobile.",
             TestKind::Warmup => "L'exercice s'arrête dès que votre rythme retrouve vos dernières sessions de flick.",
             _ => "Éliminez un maximum de cibles rouges. Chaque tir manqué fait baisser la précision.",
         };
@@ -1893,6 +2237,16 @@ impl App {
             };
             lines.push(message.to_owned());
         }
+        if self.in_daily {
+            let (yesterday, best) = self.daily_scores();
+            lines.push(match yesterday {
+                Some(score) => format!("Hier, sur les mêmes cibles : {score:.0}"),
+                None => "Pas encore de défi hier sur ce scénario.".to_owned(),
+            });
+            if let Some(score) = best {
+                lines.push(format!("Record du scénario : {score:.0}"));
+            }
+        }
         for (i, line) in lines.iter().enumerate() {
             ui.center(line, 500.0 + i as f32 * 32.0, 26.0, WHITE_SOFT);
         }
@@ -1905,6 +2259,13 @@ impl App {
             aim::AimTest::draw_replay(replay, cx, cy, 78.0 * scale);
             self.ui.center_at("Pire raté", cx, 430.0 - 115.0, 22.0, GOLD);
             self.ui.center_at(&format!("{:.1}° à côté", replay.error), cx, 430.0 + 115.0, 20.0, GREY);
+        }
+        if stats.impacts.len() >= 3 {
+            let scale = Ui::scale();
+            let cx = 150.0 * scale;
+            let cy = 430.0 * scale;
+            aim::AimTest::draw_cloud(&stats.impacts, cx, cy, 78.0 * scale);
+            self.ui.center_at("Nuage des tirs", cx, 430.0 - 115.0, 22.0, GOLD);
         }
     }
 
@@ -1933,6 +2294,54 @@ impl App {
             GREY,
         );
         ui.center("↑ ↓ : réglage  ·  ← → : modifier  ·  Entrée ou Échap : retour", 1020.0, 26.0, GOLD);
+    }
+
+    fn daily_scores(&self) -> (Option<f32>, Option<f32>) {
+        let offset = win::local_offset_secs();
+        let day = |time: f64| (time as i64 + offset).div_euclid(86400);
+        let today = day(miniquad::date::now());
+        let mut yesterday = None;
+        let mut best = None;
+        for entry in self.history.iter().filter(|entry| entry.mode == 9) {
+            best = Some(best.map_or(entry.score, |score: f32| score.max(entry.score)));
+            if day(entry.time) == today - 1 {
+                yesterday = Some(yesterday.map_or(entry.score, |score: f32| score.max(entry.score)));
+            }
+        }
+        (yesterday, best)
+    }
+
+    fn draw_transfer(&self) {
+        dim(0.82);
+        let ui = &self.ui;
+        ui.center("TRANSFERT DANS LE JEU", 140.0, 56.0, ACCENT);
+        ui.center(
+            &format!("Vitesse du pointeur Windows : {}/20", self.pointer_speed),
+            210.0,
+            28.0,
+            if (9..=11).contains(&self.pointer_speed) { ACCENT } else { GOLD },
+        );
+        let accel = if self.pointer_accel {
+            "Accélération Windows encore activée : décochez « Améliorer la précision du pointeur »."
+        } else {
+            "Accélération Windows désactivée."
+        };
+        ui.center(accel, 250.0, 24.0, if self.pointer_accel { RED } else { GREY });
+
+        let left = screen_width() / 2.0 - 520.0 * Ui::scale();
+        for (i, step) in TRANSFER_STEPS.iter().enumerate() {
+            let y = 360.0 + i as f32 * 80.0;
+            let on = (self.transfer & (1 << i)) != 0;
+            let selected = i == self.transfer_row;
+            if selected {
+                draw_rectangle(left - 24.0 * Ui::scale(), (y - 48.0) * Ui::scale(), 1080.0 * Ui::scale(), 64.0 * Ui::scale(), Color::new(0.0, 1.0, 0.78, 0.08));
+            }
+            let mark = if on { "[x]" } else { "[ ]" };
+            let color = if on { ACCENT } else if selected { WHITE_SOFT } else { GREY };
+            ui.text(&format!("{}  {}", i + 1, mark), left, y, 32.0, color);
+            ui.text(step, left + 140.0 * Ui::scale(), y, 30.0, color);
+        }
+        ui.center("1 à 4, ou espace : cocher  ·  ↑ ↓ : choisir  ·  Entrée : retour au résultat", 980.0, 26.0, GOLD);
     }
 
     fn draw_help(&self) {
@@ -2052,11 +2461,28 @@ impl App {
     }
 }
 
+fn draw_samples(samples: &[f32], left: f32, base: f32, width: f32, height: f32) {
+    if samples.len() < 2 {
+        return;
+    }
+    let min = samples.iter().copied().fold(f32::MAX, f32::min);
+    let max = samples.iter().copied().fold(f32::MIN, f32::max);
+    let span = (max - min).max(0.5);
+    let x = |i: usize| left + width * i as f32 / (samples.len() - 1) as f32;
+    let y = |value: f32| base - ((value - min) / span) * height;
+    for i in 0..samples.len() - 1 {
+        draw_line(x(i), y(samples[i]), x(i + 1), y(samples[i + 1]), 3.0, ACCENT);
+        draw_circle(x(i), y(samples[i]), 4.0, WHITE_SOFT);
+    }
+    let last = samples.len() - 1;
+    draw_circle(x(last), y(samples[last]), 4.0, WHITE_SOFT);
+}
+
 fn menu_rect(item: usize, count: usize) -> Rect {
     let s = Ui::scale();
-    let h = if count > 6 { 78.0 } else { 92.0 };
-    let step = h + 14.0;
-    let start = 230.0;
+    let h = if count > 9 { 58.0 } else if count > 6 { 72.0 } else { 92.0 };
+    let step = h + if count > 9 { 6.0 } else { 10.0 };
+    let start = if count > 9 { 188.0 } else { 230.0 };
     let w = 820.0 * s;
     Rect::new((screen_width() - w) / 2.0, (start + item as f32 * step) * s, w, h * s)
 }

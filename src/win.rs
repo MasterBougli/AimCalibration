@@ -1,6 +1,40 @@
 //! Petits appels Windows : accélération du pointeur et presse-papiers.
 
-/// « Améliorer la précision du pointeur » est activé quand le troisième champ de SPI_GETMOUSE est non nul.
+/// Vitesse du pointeur Windows, de 1 à 20. League of Legends utilise cette valeur.
+pub fn pointer_speed() -> u32 {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{SPI_GETMOUSESPEED, SystemParametersInfoW};
+        let mut speed = 10i32;
+        unsafe {
+            if SystemParametersInfoW(SPI_GETMOUSESPEED, 0, (&mut speed as *mut i32).cast(), 0) == 0 {
+                return 10;
+            }
+        }
+        speed.clamp(1, 20) as u32
+    }
+    #[cfg(not(windows))]
+    {
+        10
+    }
+}
+
+/// Décalage local en secondes (heure locale = UTC + décalage).
+pub fn local_offset_secs() -> i64 {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Time::{GetTimeZoneInformation, TIME_ZONE_INFORMATION};
+        let mut info = unsafe { std::mem::zeroed::<TIME_ZONE_INFORMATION>() };
+        unsafe {
+            GetTimeZoneInformation(&mut info);
+        }
+        -(info.Bias as i64) * 60
+    }
+    #[cfg(not(windows))]
+    {
+        0
+    }
+}
 pub fn enhance_pointer_precision() -> bool {
     #[cfg(windows)]
     {
