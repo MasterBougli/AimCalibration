@@ -14,6 +14,8 @@ const TRACK_BASE_SPEED: (f32, f32) = (18.0, 42.0);
 pub enum TestKind {
     /// 12 cibles flick puis 8 s de tracking, pour comparer deux sensibilités.
     Calibration,
+    /// Flick puis tracking, la sensibilité change pendant le jeu jusqu'à se stabiliser.
+    Live,
     Flick,
     Tracking,
     /// Petites corrections : les cibles apparaissent près du viseur.
@@ -125,6 +127,14 @@ pub struct Stats {
     pub tremor: f32,
     pub correction_ms: f32,
     pub traces: u32,
+    /// Somme des écarts au moment du clic : positif = trop à droite / trop haut.
+    pub bias_yaw: f32,
+    pub bias_pitch: f32,
+    pub bias_n: u32,
+    pub short_hits: u32,
+    pub short_shots: u32,
+    pub long_hits: u32,
+    pub long_shots: u32,
 }
 
 impl Stats {
@@ -206,6 +216,41 @@ impl Stats {
             _ => self.click_score(),
         }
     }
+
+    /// Un écart répété d'un même côté est une habitude, pas une mauvaise sensibilité.
+    pub fn direction_note(&self) -> Option<String> {
+        if self.bias_n < 6 {
+            return None;
+        }
+        let yaw = self.bias_yaw / self.bias_n as f32;
+        let pitch = self.bias_pitch / self.bias_n as f32;
+        let mut parts = Vec::new();
+        if yaw.abs() >= 0.7 {
+            parts.push(if yaw > 0.0 { "trop à droite" } else { "trop à gauche" });
+        }
+        if pitch.abs() >= 0.7 {
+            parts.push(if pitch > 0.0 { "trop haut" } else { "trop bas" });
+        }
+        Some(if parts.is_empty() {
+            "Visée centrée : l'erreur ne vient pas d'un côté.".to_owned()
+        } else {
+            format!(
+                "Biais : {}. Ça ne se corrige pas en changeant la sensibilité.",
+                parts.join(", ")
+            )
+        })
+    }
+
+    /// Précision des flicks de moins de 8° et de plus de 18°.
+    pub fn distance_note(&self) -> Option<String> {
+        let bucket = |hits: u32, shots: u32| (shots >= 3).then(|| hits as f32 / shots as f32 * 100.0);
+        match (bucket(self.short_hits, self.short_shots), bucket(self.long_hits, self.long_shots)) {
+            (Some(short), Some(long)) => Some(format!("Flicks courts : {short:.0} %  ·  flicks longs : {long:.0} %")),
+            (Some(short), None) => Some(format!("Flicks courts : {short:.0} %")),
+            (None, Some(long)) => Some(format!("Flicks longs : {long:.0} %")),
+            (None, None) => None,
+        }
+    }
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -253,6 +298,20 @@ pub struct AimTest {
     pub worst: Option<MissReplay>,
     settings: Settings,
     deg_per_count: f32,
+    base_deg: f32,
+    pub live_mult: f32,
+    pub live_step: f32,
+    pub live_locked: bool,
+    live_sign: f32,
+    flick_overshoot: f32,
+    flick_reach: f32,
+    flick_side: f32,
+    flick_span: f32,
+    flick_sample: bool,
+    live_window: f32,
+    live_on: f32,
+    live_aim0: f32,
+    live_tgt0: f32,
     flick_time_left: f32,
     target_yaw: f32,
     target_pitch: f32,
@@ -289,7 +348,7 @@ impl AimTest {
     /// Le calibrage ignore `settings` et utilise toujours la difficulté Normale.
     /// `v_ratio` : multiplicateur vertical. `ads_ratio` : multiplicateur en visée (clic droit).
     pub fn new(deg_per_count: f32, kind: TestKind, settings: Settings, v_ratio: f32, ads_ratio: f32, invert_y: bool) -> Self {
-        let settings = if kind == TestKind::Calibration {
+        let settings = if matches!(kind, TestKind::Calibration | TestKind::Live) {
             Settings::preset(NORMAL, DEFAULT_DURATION)
         } else {
             settings
@@ -306,7 +365,21 @@ impl AimTest {
             worst: None,
             settings,
             deg_per_count,
-            flick_time_left: settings.duration_secs(),
+            base_deg: deg_per_count,
+            live_mult: 1.0,
+            live_step: 0.08,
+            live_locked: false,
+            live_sign: 0.0,
+            flick_overshoot: 0.0,
+            flick_reach: 1.0,
+            flick_side: 0.0,
+            flick_span: 0.0,
+            flick_sample: false,
+            live_window: 0.0,
+            live_on: 0.0,
+            live_aim0: 0.0,
+            live_tgt0: 0.0,
+            flick_time_left: if kind == TestKind::Live { 40.0 } else { settings.duration_secs() },
             target_yaw: 0.0,
             target_pitch: 0.0,
             target_spawn: get_time(),
@@ -315,13 +388,21 @@ impl AimTest {
             track_vel: 0.0,
             track_pitch_vel: 0.0,
             track_switch_in: 0.0,
-            track_left: if kind == TestKind::Calibration { TRACK_DURATION } else { settings.duration_secs() },
+            track_left: match kind {
+                TestKind::Calibration => TRACK_DURATION,
+                TestKind::Live => 24.0,
+                _ => settings.duration_secs(),
+            },
             track_clock: 0.0,
             bots: [(0.0, 5.0), (20.0, 5.0)],
             active: 0,
             hidden_until: 0.0,
             v_ratio: v_ratio.clamp(0.1, 2.0),
-            flick_budget: if kind == TestKind::Warmup { 180.0 } else { settings.duration_secs() },
+            flick_budget: match kind {
+                TestKind::Warmup => 180.0,
+                TestKind::Live => 40.0,
+                _ => settings.duration_secs(),
+            },
             trace: Vec::new(),
             aim_origin: (0.0, 0.0),
             cover_yaw: -18.0,
@@ -374,12 +455,18 @@ impl AimTest {
     fn begin_trace(&mut self) {
         self.trace.clear();
         self.aim_origin = (self.yaw, self.pitch);
+        let (ty, tp) = self.primary();
+        self.flick_span = ((ty - self.yaw).powi(2) + (tp - self.pitch).powi(2)).sqrt();
     }
 
     fn start_tracking(&mut self) {
         self.phase = Phase::TrackWait;
         self.target_yaw = 0.0;
         self.target_pitch = 5.0;
+        self.live_window = 0.0;
+        self.live_on = 0.0;
+        self.live_aim0 = self.yaw;
+        self.live_tgt0 = 0.0;
     }
 
     fn spawn_flick(&mut self) {
@@ -499,6 +586,24 @@ impl AimTest {
         }
     }
 
+    fn note_aim(&mut self, hit: bool) {
+        let (ty, tp) = self.primary();
+        self.stats.bias_yaw += self.yaw - ty;
+        self.stats.bias_pitch += self.pitch - tp;
+        self.stats.bias_n += 1;
+        if self.flick_span < 8.0 {
+            self.stats.short_shots += 1;
+            if hit {
+                self.stats.short_hits += 1;
+            }
+        } else if self.flick_span > 18.0 {
+            self.stats.long_shots += 1;
+            if hit {
+                self.stats.long_hits += 1;
+            }
+        }
+    }
+
     /// `counts` : déplacement brut de la souris (comptes du capteur) depuis la frame précédente.
     pub fn update(&mut self, counts: Vec2, shot: bool, zoomed: bool, dt: f32) {
         self.feedback = Feedback::None;
@@ -527,10 +632,14 @@ impl AimTest {
                     self.feedback = Feedback::Miss;
                 } else if shot {
                     let hit = self.register_shot();
+                    self.note_aim(hit);
                     if !hit {
                         self.remember_miss();
                     }
                     self.analyze_trace();
+                    if self.kind == TestKind::Live && self.flick_sample {
+                        self.adapt_flick();
+                    }
                     if hit {
                         self.stats.flick_ms.push(((get_time() - self.target_spawn) * 1000.0) as f32);
                         self.flick_left = self.flick_left.saturating_sub(1);
@@ -559,6 +668,19 @@ impl AimTest {
                 if self.aiming_at_target() {
                     self.phase = Phase::Track;
                     self.track_switch_in = 0.0;
+                    self.live_window = 0.0;
+                    self.live_on = 0.0;
+                    self.live_aim0 = self.yaw;
+                    self.live_tgt0 = self.target_yaw;
+                } else if self.kind == TestKind::Live {
+                    self.live_window += dt;
+                    if self.live_window > 4.0 {
+                        self.phase = Phase::Track;
+                        self.live_window = 0.0;
+                        self.live_on = 0.0;
+                        self.live_aim0 = self.yaw;
+                        self.live_tgt0 = self.target_yaw;
+                    }
                 }
             }
             Phase::Track => {
@@ -595,11 +717,32 @@ impl AimTest {
                     self.stats.track_on += dt;
                 }
                 self.track_left -= dt;
+                if self.kind == TestKind::Live {
+                    self.live_window += dt;
+                    if self.aiming_at_target() {
+                        self.live_on += dt;
+                    }
+                    if self.live_window >= 1.4 {
+                        self.adapt_track();
+                        self.live_window = 0.0;
+                        self.live_on = 0.0;
+                        self.live_aim0 = self.yaw;
+                        self.live_tgt0 = self.target_yaw;
+                    }
+                }
                 if self.track_left <= 0.0 {
                     self.phase = Phase::Done;
                 }
             }
             Phase::Done => {}
+        }
+
+        if self.kind == TestKind::Live && self.phase == Phase::Flick {
+            self.flick_time_left -= dt;
+            if self.flick_time_left <= 0.0 {
+                self.track_left = 24.0;
+                self.start_tracking();
+            }
         }
 
         if self.timed_drill() && self.phase != Phase::Done {
@@ -683,7 +826,73 @@ impl AimTest {
         draw_circle_lines(target.x, target.y, 14.0, 2.0, Color::new(1.0, 0.85, 0.3, alpha));
     }
 
+    fn apply_bias(&mut self, bias: f32) {
+        if self.live_locked {
+            return;
+        }
+        if bias.abs() < 0.2 {
+            self.live_step = (self.live_step * 0.9).max(0.008);
+        } else {
+            let sign = bias.signum();
+            if self.live_sign != 0.0 && sign != self.live_sign {
+                self.live_step *= 0.55;
+            }
+            self.live_sign = sign;
+            self.live_mult = (self.live_mult * (1.0 + sign * self.live_step)).clamp(0.45, 2.2);
+            self.deg_per_count = self.base_deg * self.live_mult;
+        }
+        if self.live_step < 0.012 {
+            self.live_locked = true;
+        }
+    }
+
+    /// Trop de dépassement : sensibilité trop haute. Mouvement qui s'arrête avant la cible : trop basse.
+    fn adapt_flick(&mut self) {
+        let sideways = self.flick_side > 2.0
+            && self.flick_overshoot < self.flick_side
+            && (0.75..1.2).contains(&self.flick_reach);
+        if sideways {
+            return;
+        }
+        let bias = if self.flick_overshoot > 2.0 {
+            -1.0
+        } else if self.flick_reach < 0.85 {
+            1.0
+        } else if self.flick_overshoot > 0.9 {
+            -0.45
+        } else if self.flick_reach < 0.96 {
+            0.45
+        } else {
+            0.0
+        };
+        self.apply_bias(bias);
+    }
+
+    /// Le viseur qui traîne derrière la cible accélère la souris. Un viseur qui la double la ralentit.
+    fn adapt_track(&mut self) {
+        let aim = self.yaw - self.live_aim0;
+        let target = self.target_yaw - self.live_tgt0;
+        let on_target = self.live_on / self.live_window.max(0.1);
+        if target.abs() < 4.0 {
+            return;
+        }
+        if on_target > 0.72 {
+            self.apply_bias(0.0);
+            return;
+        }
+        let ratio = aim / target;
+        let bias = if ratio > 1.35 || ratio < 0.0 {
+            -1.0
+        } else if ratio < 0.7 {
+            1.0
+        } else {
+            0.0
+        };
+        self.apply_bias(bias);
+    }
+
     fn analyze_trace(&mut self) {
+        self.flick_sample = false;
         let target = self.primary();
         let origin = self.aim_origin;
         let v = (target.0 - origin.0, target.1 - origin.1);
@@ -696,6 +905,17 @@ impl AimTest {
             max_t = max_t.max(((y - origin.0) * v.0 + (p - origin.1) * v.1) / vlen2);
         }
         let overshoot = ((max_t - 1.0).max(0.0) * vlen2.sqrt()).min(40.0);
+        let mut side = 0.0f32;
+        for &(_, y, p) in &self.trace {
+            let t = ((y - origin.0) * v.0 + (p - origin.1) * v.1) / vlen2;
+            let dx = y - (origin.0 + t * v.0);
+            let dy = p - (origin.1 + t * v.1);
+            side = side.max((dx * dx + dy * dy).sqrt());
+        }
+        self.flick_overshoot = overshoot;
+        self.flick_reach = max_t;
+        self.flick_side = side;
+        self.flick_sample = true;
 
         let now = get_time();
         let recent: Vec<_> = self.trace.iter().copied().filter(|sample| now - sample.0 <= 0.22).collect();
@@ -809,6 +1029,16 @@ impl AimTest {
     pub fn status(&self) -> String {
         match self.phase {
             Phase::Hidden => format!("Réflexes — {:.0} s  ·  attendez la cible", self.flick_time_left.max(0.0).ceil()),
+            Phase::Flick if self.kind == TestKind::Live => format!(
+                "Flick — {:.0} s  ·  {}",
+                self.flick_time_left.max(0.0).ceil(),
+                if self.live_locked { "sensibilité stabilisée" } else { "la sensibilité s'ajuste" }
+            ),
+            Phase::Track if self.kind == TestKind::Live => format!(
+                "Tracking — {:.0} s  ·  {}",
+                self.track_left.max(0.0).ceil(),
+                if self.live_locked { "sensibilité stabilisée" } else { "la sensibilité s'ajuste" }
+            ),
             Phase::Flick if self.timed_drill() => {
                 let label = match self.kind {
                     TestKind::Micro => "Micro",

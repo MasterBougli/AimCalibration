@@ -34,13 +34,19 @@ Les exercices proposent quatre difficultés (Facile, Normal, Difficile, Expert),
 | Mouvements verticaux | | ✓ | Oui, Non |
 | Zone d'apparition | ✓ | ✓ | Étroite, Normale, Large |
 
-Un record est gardé par mode, difficulté prédéfinie et durée, dans `records_entrainement.txt`. Après un calibrage, votre sensibilité idéale est pré-remplie pour vous entraîner directement avec.
+Un record est gardé par mode, difficulté prédéfinie et durée, dans `records_entrainement.txt`. Après un calibrage, votre sensibilité idéale est pré-remplie pour vous entraîner directement avec. Chaque jeu garde sa propre sensibilité, son FOV et ses multiplicateurs.
+
+La routine de 10 minutes commence par le flick, puis enchaîne les deux exercices où vos dernières sessions sont le plus loin de votre record. Sans historique, elle reprend l'ordre Flick, Tracking, Micro, Switching, Réflexes.
+
+Si « Améliorer la précision du pointeur » est activé dans Windows, un message l'indique au menu : cette accélération fausse le cm/360°.
+
+Sur l'écran de résultat, **C** copie la ligne du jeu sélectionné (`Valorant · 800 DPI · 0.352`). Le bilan d'un exercice sépare aussi les flicks courts et les flicks longs, et signale un biais répété (trop à droite, trop haut) : ce biais ne se corrige pas en changeant la sensibilité.
 
 ## Trouver sa sensibilité : comment ça marche
 
 1. **Configuration** : indiquez le DPI de votre souris, le jeu dont vous connaissez la sensibilité et sa valeur actuelle. Vous ne savez pas ? Choisissez « Je ne sais pas » et appuyez sur **M** pour détecter et mesurer votre DPI.
-2. **6 manches de test** : chaque manche compare deux sensibilités, **A** et **B**, à l'aveugle. Pour chacune, vous éliminez 12 cibles (flick), puis vous suivez une cible mobile pendant 8 secondes (tracking).
-3. **Votre choix** : après chaque manche, l'application affiche vos statistiques (précision, temps par cible, tracking) et suggère la meilleure. Vous gardez celle qui vous semble la plus naturelle, et l'écart entre les deux sensibilités est divisé par deux.
+2. **Réglage en direct** (Entrée) : 40 secondes de flick, puis 24 secondes de tracking. La sensibilité change pendant que vous visez. Un dépassement la baisse, un viseur qui reste avant la cible la monte. Quand les corrections deviennent minuscules, le réglage est stabilisé. Le chiffre n'apparaît qu'à la fin, pour ne pas le courir.
+3. **Comparaison en manches** (touche C) : 6 manches. Chaque manche compare deux sensibilités, **A** et **B**, à l'aveugle. Pour chacune, vous éliminez 12 cibles (flick), puis vous suivez une cible mobile pendant 8 secondes (tracking). Vous gardez celle qui vous semble la plus naturelle, et l'écart est divisé par deux.
 4. **Résultat** : votre sensibilité idéale en **cm/360°**, convertie pour chaque jeu supporté, avec l'eDPI. Appuyez sur **S** pour la sauvegarder dans `resultats_sensibilite.txt`.
 
 La mesure lit les déplacements bruts du capteur de la souris : l'accélération et la vitesse du pointeur Windows n'ont aucun effet, comme dans les vrais FPS.
@@ -51,7 +57,8 @@ La mesure lit les déplacements bruts du capteur de la souris : l'accélération
 | --- | --- |
 | ↑ ↓ / Tab / souris | Naviguer dans le menu et les champs |
 | ← → | Changer de jeu ou de difficulté |
-| Entrée / clic | Valider, commencer |
+| Entrée / clic | Valider, lancer le réglage en direct |
+| C | Copier le réglage du jeu sélectionné (écran de résultat). Depuis l'écran de sensibilité : comparaison en 6 manches |
 | M | Détecter la souris et mesurer le DPI |
 | H / F1 | Aide sur les termes (DPI, cm/360°, eDPI, FOV) |
 | Échap | Pause pendant un test, retour au menu principal, quitter depuis le menu |

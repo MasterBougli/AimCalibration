@@ -5,6 +5,7 @@ mod games;
 mod mouse_info;
 mod persist;
 mod sfx;
+mod win;
 
 use aim::{
     AimTest, Crosshair, DEFAULT_DURATION, DURATIONS, FLICK_TARGETS, LIFETIMES, MOTIONS, MissReplay, NORMAL, PRESETS,
@@ -24,7 +25,7 @@ const RESULTS_FILE: &str = "resultats_sensibilite.txt";
 const RECORDS_FILE: &str = "records_entrainement.txt";
 
 const MENU: &[(&str, &str)] = &[
-    ("Trouver ma sensibilité", "6 manches de comparaison à l'aveugle pour trouver votre réglage idéal"),
+    ("Trouver ma sensibilité", "La sensibilité change pendant le flick et le tracking, jusqu'à la bonne"),
     ("Entraînement", "Flick, tracking, micro-ajustements, switching, réflexes et routine"),
     ("Historique", "L'évolution de vos scores"),
     ("Viseur", "Couleur, écart, longueur, épaisseur et point central"),
@@ -41,7 +42,7 @@ const TRAIN_MENU: &[(&str, &str)] = &[
     ("Réflexes", "Tirez dès que la cible apparaît"),
     ("Peeks", "La cible sort d'un mur : tirez pendant qu'elle est visible"),
     ("Échauffement", "S'arrête dès que vous retrouvez votre niveau récent"),
-    ("Routine du jour", "10 minutes guidées : 5 exercices de 2 minutes"),
+    ("Routine du jour", "10 minutes : flick, puis vos deux exercices les plus faibles"),
     ("Retour", "Revenir au menu principal"),
 ];
 
@@ -149,7 +150,7 @@ fn record_index(kind: TestKind) -> Option<usize> {
         TestKind::Switching => Some(3),
         TestKind::Reflex => Some(4),
         TestKind::Peek => Some(5),
-        TestKind::Calibration | TestKind::Warmup => None,
+        TestKind::Calibration | TestKind::Warmup | TestKind::Live => None,
     }
 }
 
@@ -176,6 +177,7 @@ fn load_records() -> Records {
 fn mode_name(kind: TestKind) -> &'static str {
     match kind {
         TestKind::Calibration => "Trouver ma sensibilité",
+        TestKind::Live => "Réglage en direct",
         TestKind::Flick => "Flick",
         TestKind::Tracking => "Tracking",
         TestKind::Micro => "Micro-ajustements",
@@ -298,6 +300,12 @@ struct App {
     week_goal: u32,
     warmup_rate: f32,
     warmup_reached: bool,
+    live_note: Option<String>,
+    session_stats: Option<Stats>,
+    pointer_accel: bool,
+    game_tunes: Vec<persist::GameTune>,
+    routine_plan: Vec<TestKind>,
+    routine_focus: Vec<bool>,
     last_elapsed: f32,
     in_routine: bool,
     routine_i: usize,
@@ -364,6 +372,12 @@ impl App {
             week_goal: profile.week_goal,
             warmup_rate: 0.0,
             warmup_reached: false,
+            live_note: None,
+            session_stats: None,
+            pointer_accel: win::enhance_pointer_precision(),
+            game_tunes: profile.games,
+            routine_plan: Vec::new(),
+            routine_focus: Vec::new(),
             last_elapsed: 0.0,
             in_routine: false,
             routine_i: 0,
@@ -495,11 +509,20 @@ impl App {
         Some(cm)
     }
 
-    fn start(&mut self) {
+    fn start(&mut self, live: bool) {
         let Some(cm) = self.read_settings() else { return };
         match self.mode {
+            TestKind::Calibration if live => {
+                self.base_cm = cm;
+                self.train_cm = cm;
+                self.live_note = None;
+                self.spawn_test_at(cm, TestKind::Live, self.train);
+                self.grab(true);
+                self.screen = Screen::Playing;
+            }
             TestKind::Calibration => {
                 self.base_cm = cm;
+                self.live_note = None;
                 self.round = 0;
                 self.lo = 0.5;
                 self.hi = 1.5;
@@ -510,7 +533,8 @@ impl App {
                 if self.in_routine {
                     self.routine_i = 0;
                     self.routine_scores.clear();
-                    self.mode = ROUTINE[0];
+                    self.build_routine();
+                    self.mode = self.routine_plan[0];
                     self.train = routine_settings();
                     self.screen = Screen::RoutineBrief;
                 } else {
@@ -587,7 +611,70 @@ impl App {
         if self.test.as_ref().is_some_and(|test| test.zoomed) { self.fov / aim::ADS_ZOOM } else { self.fov }
     }
 
-    fn save_profile(&self) {
+    fn remember_game(&mut self) {
+        let slot = self.game.min(self.game_tunes.len().saturating_sub(1));
+        if let Some(tune) = self.game_tunes.get_mut(slot) {
+            tune.sens = self.sens_text.clone();
+            tune.fov = self.fov_text.clone();
+            tune.vsens = self.v_sens_text.clone();
+            tune.ads = self.ads_text.clone();
+        }
+    }
+
+    fn apply_game(&mut self) {
+        let slot = self.game.min(self.game_tunes.len().saturating_sub(1));
+        if let Some(tune) = self.game_tunes.get(slot) {
+            self.sens_text = tune.sens.clone();
+            self.fov_text = tune.fov.clone();
+            self.v_sens_text = tune.vsens.clone();
+            self.ads_text = tune.ads.clone();
+        }
+    }
+
+    /// Flick, puis les deux exercices les plus loin de leur record, chacun retravaillé.
+    fn build_routine(&mut self) {
+        const POOL: [TestKind; 5] = [
+            TestKind::Tracking,
+            TestKind::Micro,
+            TestKind::Switching,
+            TestKind::Reflex,
+            TestKind::Peek,
+        ];
+        let mut ranked = Vec::new();
+        for kind in POOL {
+            let Some(mode) = record_index(kind) else { continue };
+            let scores: Vec<f32> = self.history.iter().filter(|entry| entry.mode == mode).map(|entry| entry.score).collect();
+            if scores.len() < 2 {
+                continue;
+            }
+            let best = scores.iter().copied().fold(0.0f32, f32::max);
+            if best <= 0.0 {
+                continue;
+            }
+            let n = scores.len().min(5);
+            let recent = scores[scores.len() - n..].iter().sum::<f32>() / n as f32;
+            ranked.push((kind, recent / best));
+        }
+        ranked.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let plan = if ranked.len() >= 2 {
+            vec![TestKind::Flick, ranked[0].0, ranked[1].0, ranked[0].0, TestKind::Flick]
+        } else if let Some((kind, _)) = ranked.first() {
+            let filler = POOL.into_iter().find(|item| item != kind).unwrap_or(TestKind::Tracking);
+            vec![TestKind::Flick, *kind, filler, *kind, TestKind::Flick]
+        } else {
+            ROUTINE.to_vec()
+        };
+        let weak: Vec<TestKind> = ranked.iter().take(2).map(|(kind, _)| *kind).collect();
+        self.routine_focus = if ranked.is_empty() {
+            vec![false; plan.len()]
+        } else {
+            plan.iter().enumerate().map(|(i, kind)| i != 0 && i + 1 != plan.len() && weak.contains(kind)).collect()
+        };
+        self.routine_plan = plan;
+    }
+
+    fn save_profile(&mut self) {
+        self.remember_game();
         persist::save_profile(&persist::Profile {
             dpi: self.dpi_text.clone(),
             sens: self.sens_text.clone(),
@@ -600,6 +687,7 @@ impl App {
             week_done: self.week_done,
             week_goal: self.week_goal,
             game: self.game,
+            games: self.game_tunes.clone(),
             train: self.train,
             crosshair: self.crosshair,
         });
@@ -752,11 +840,11 @@ impl App {
         if self.in_routine {
             self.routine_scores.push((self.mode, stats.training_score(self.mode)));
             self.routine_i += 1;
-            if self.routine_i >= ROUTINE.len() {
+            if self.routine_i >= self.routine_plan.len() {
                 self.in_routine = false;
                 self.screen = Screen::RoutineSummary;
             } else {
-                self.mode = ROUTINE[self.routine_i];
+                self.mode = self.routine_plan[self.routine_i];
                 self.train = routine_settings();
                 self.screen = Screen::RoutineBrief;
             }
@@ -794,10 +882,45 @@ impl App {
             }
             let sens = games::sens_for(GAMES[self.game].yaw, self.cm(self.final_mult()), self.dpi);
             self.sens_text = format!("{sens:.3}");
+            self.session_stats = None;
+            self.live_note = None;
+            self.save_profile();
             self.screen = Screen::Final;
         } else {
             self.new_round();
         }
+    }
+
+    fn finish_live(&mut self, stats: Stats, mult: f32, step: f32, locked: bool) {
+        let found = self.base_cm / mult;
+        self.base_cm = found;
+        self.lo = 1.0;
+        self.hi = 1.0;
+        self.live_note = Some(if locked {
+            format!("Réglage stabilisé pendant le jeu, à environ ±{:.0} %.", (step * 100.0).max(1.0))
+        } else {
+            "La session s'est terminée avant stabilisation. Relancez pour affiner.".to_owned()
+        });
+        if self.unknown_game() {
+            self.game = 0;
+        }
+        let sens = games::sens_for(GAMES[self.game].yaw, found, self.dpi);
+        self.sens_text = format!("{sens:.3}");
+        self.session_stats = Some(stats);
+        self.save_profile();
+        self.screen = Screen::Final;
+    }
+
+    fn copy_result(&mut self) {
+        let cm = self.cm(self.final_mult());
+        let game = GAMES.get(self.game).unwrap_or(&GAMES[0]);
+        let sens = games::sens_for(game.yaw, cm, self.dpi);
+        let line = format!("{} · {:.0} DPI · {sens:.3}", game.name, self.dpi);
+        self.notice = Some(if win::copy_text(&line) {
+            format!("Copié : {line}")
+        } else {
+            "Impossible de copier dans le presse-papiers.".to_owned()
+        });
     }
 
     fn save(&mut self) {
@@ -909,10 +1032,14 @@ impl App {
                 if self.field == 1 {
                     let choices = GAMES.len() + 1;
                     if is_key_pressed(KeyCode::Left) {
+                        self.remember_game();
                         self.game = (self.game + choices - 1) % choices;
+                        self.apply_game();
                     }
                     if is_key_pressed(KeyCode::Right) {
+                        self.remember_game();
                         self.game = (self.game + 1) % choices;
+                        self.apply_game();
                     }
                 }
                 let field = self.field;
@@ -941,7 +1068,9 @@ impl App {
                     }
                 }
                 if is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter) {
-                    self.start();
+                    self.start(self.mode == TestKind::Calibration);
+                } else if chars.contains(&'c') && self.mode == TestKind::Calibration {
+                    self.start(false);
                 }
             }
             Screen::Intro => {
@@ -1012,9 +1141,14 @@ impl App {
                     self.sfx.done();
                     let stats = test.stats.clone();
                     let kind = test.kind;
+                    let live = (test.live_mult, test.live_step, test.live_locked);
                     self.worst_miss = test.worst.clone();
                     self.test = None;
                     self.grab(false);
+                    if kind == TestKind::Live {
+                        self.finish_live(stats, live.0, live.1, live.2);
+                        return false;
+                    }
                     if kind != TestKind::Calibration {
                         self.finish_training(stats);
                         return false;
@@ -1052,6 +1186,8 @@ impl App {
             Screen::Final => {
                 if chars.contains(&'s') {
                     self.save();
+                } else if chars.contains(&'c') {
+                    self.copy_result();
                 } else if chars.contains(&'r') {
                     self.notice = None;
                     self.screen = Screen::Setup;
@@ -1138,6 +1274,14 @@ impl App {
             }
             Screen::MainMenu => {
                 self.draw_menu("AIM CALIBRATION", "Sensibilité et entraînement pour vos jeux FPS", MENU, self.menu_sel);
+                if self.pointer_accel {
+                    self.ui.center(
+                        "Accélération Windows activée : décochez « Améliorer la précision du pointeur ».",
+                        910.0,
+                        22.0,
+                        RED,
+                    );
+                }
                 self.draw_week_bar();
             }
             Screen::TrainMenu => self.draw_menu("ENTRAÎNEMENT", "Choisissez un exercice", TRAIN_MENU, self.train_sel),
@@ -1169,6 +1313,7 @@ impl App {
             TestKind::Calibration => {
                 format!("Manche {}/{}  ·  Sensibilité {}", self.round + 1, ROUNDS, slot_name(self.slot))
             }
+            TestKind::Live => "Réglage en direct  ·  visez normalement, sans regarder les chiffres".to_owned(),
             kind => format!("{}  ·  {}", mode_name(kind), settings_summary(&self.train)),
         };
         self.ui.text(&label, 30.0, 50.0, 28.0, GREY);
@@ -1273,12 +1418,19 @@ impl App {
         ui.center(&preview, 720.0, 30.0, GOLD);
         if let Some(err) = &self.error {
             ui.center(err, 765.0, 28.0, RED);
+        } else if self.pointer_accel {
+            ui.center(
+                "Accélération Windows activée : décochez « Améliorer la précision du pointeur », sinon le résultat sera faux.",
+                765.0,
+                24.0,
+                RED,
+            );
         }
 
         let help = match self.mode {
             TestKind::Calibration => [
-                format!("{ROUNDS} manches. À chaque manche, deux sensibilités sont testées à l'aveugle (A et B) :"),
-                format!("{FLICK_TARGETS} cibles à éliminer en flick, puis {TRACK_DURATION:.0} s de tracking. Choisissez la meilleure, l'écart se resserre."),
+                "Entrée : 40 s de flick puis 24 s de tracking. La sensibilité change toute seule selon vos dépassements et votre suivi.".to_owned(),
+                format!("C : l'autre méthode, {ROUNDS} manches où vous choisissez entre deux sensibilités."),
             ],
             _ => [
                 "L'entraînement utilise exactement la sensibilité indiquée ci-dessus.".to_owned(),
@@ -1287,12 +1439,12 @@ impl App {
         };
         ui.center(&help[0], 820.0, 26.0, GREY);
         ui.center(&help[1], 856.0, 26.0, GREY);
-        ui.center(
-            "↑ ↓ : champ  ·  ← → : jeu  ·  Entrée : continuer  ·  H / F1 : aide  ·  M : mesurer le DPI  ·  Échap : menu principal",
-            1020.0,
-            24.0,
-            GREY,
-        );
+        let footer = if self.mode == TestKind::Calibration {
+            "↑ ↓ : champ  ·  ← → : jeu  ·  Entrée : réglage en direct  ·  C : comparaison en manches  ·  H : aide  ·  M : DPI  ·  Échap : menu"
+        } else {
+            "↑ ↓ : champ  ·  ← → : jeu  ·  Entrée : continuer  ·  H / F1 : aide  ·  M : mesurer le DPI  ·  Échap : menu principal"
+        };
+        ui.center(footer, 1020.0, 24.0, GREY);
     }
 
     fn draw_intro(&self) {
@@ -1366,11 +1518,26 @@ impl App {
             30.0,
             WHITE_SOFT,
         );
+        if let Some(note) = &self.live_note {
+            ui.center(note, 352.0, 24.0, GOLD);
+        }
+        let mut games_top = 400.0;
+        if let Some(stats) = &self.session_stats {
+            if let Some(line) = stats.direction_note() {
+                ui.center(&line, games_top, 24.0, WHITE_SOFT);
+                games_top += 30.0;
+            }
+            if let Some(line) = stats.distance_note() {
+                ui.center(&line, games_top, 24.0, WHITE_SOFT);
+                games_top += 30.0;
+            }
+            games_top += 16.0;
+        }
 
         let left = screen_width() / 2.0 - 400.0 * Ui::scale();
         let right = screen_width() / 2.0 + 180.0 * Ui::scale();
         for (i, game) in GAMES.iter().enumerate() {
-            let y = 400.0 + i as f32 * 50.0;
+            let y = games_top + i as f32 * 46.0;
             let sens = games::sens_for(game.yaw, cm, self.dpi);
             let color = if i == self.game { GOLD } else { WHITE_SOFT };
             ui.text(game.name, left, y, 32.0, color);
@@ -1378,7 +1545,7 @@ impl App {
             ui.text(&format!("eDPI {:.0}", sens * self.dpi), right + 140.0 * Ui::scale(), y, 24.0, GREY);
         }
 
-        let mut y = 400.0 + GAMES.len() as f32 * 50.0 + 30.0;
+        let mut y = games_top + GAMES.len() as f32 * 46.0 + 24.0;
         if !(0.53..=1.47).contains(&mult) {
             ui.center(
                 "Résultat en bord de plage : appuyez sur R pour relancer à partir de cette valeur et aller plus loin.",
@@ -1410,7 +1577,7 @@ impl App {
             GREY,
         );
         ui.center(
-            "S : sauvegarder  ·  R : affiner à partir de ce résultat  ·  Échap : menu principal",
+            "S : sauvegarder  ·  C : copier  ·  R : affiner  ·  Échap : menu principal",
             1020.0,
             28.0,
             GOLD,
@@ -1542,9 +1709,12 @@ impl App {
     fn draw_routine_brief(&self) {
         dim(0.7);
         let ui = &self.ui;
-        ui.center(&format!("Routine  ·  étape {} / {}", self.routine_i + 1, ROUTINE.len()), 340.0, 36.0, GREY);
+        ui.center(&format!("Routine  ·  étape {} / {}", self.routine_i + 1, self.routine_plan.len().max(1)), 340.0, 36.0, GREY);
         ui.center(mode_name(self.mode), 450.0, 80.0, ACCENT);
         ui.center("2 minutes  ·  difficulté Normale", 540.0, 32.0, WHITE_SOFT);
+        if self.routine_focus.get(self.routine_i).copied().unwrap_or(false) {
+            ui.center("Point faible : vous êtes loin de votre meilleur score sur cet exercice.", 590.0, 26.0, GOLD);
+        }
         let desc = match self.mode {
             TestKind::Tracking => "Gardez le viseur sur la cible le plus longtemps possible.",
             TestKind::Micro => "De petites cibles apparaissent près du viseur.",
@@ -1706,6 +1876,12 @@ impl App {
             lines.push(format!("Dépassement de la cible : {:.1}°", stats.avg_overshoot()));
             lines.push(format!("Tremblement en fin de geste : {tremor}"));
             lines.push(format!("Temps d'ajustement avant le clic : {:.0} ms", stats.avg_correction()));
+        }
+        if let Some(line) = stats.direction_note() {
+            lines.push(line);
+        }
+        if let Some(line) = stats.distance_note() {
+            lines.push(line);
         }
         if self.mode == TestKind::Warmup {
             let message = if self.warmup_reached {

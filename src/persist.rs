@@ -10,6 +10,7 @@ pub struct Profile {
     pub sens: String,
     pub fov: String,
     pub game: usize,
+    pub games: Vec<GameTune>,
     pub train: Settings,
     pub crosshair: Crosshair,
     /// Multiplicateur de sensibilité verticale. 1 = identique à l'horizontale.
@@ -21,6 +22,15 @@ pub struct Profile {
     pub week: i64,
     pub week_done: u32,
     pub week_goal: u32,
+}
+
+/// Sensibilité, FOV et multiplicateurs propres à un jeu.
+#[derive(Clone)]
+pub struct GameTune {
+    pub sens: String,
+    pub fov: String,
+    pub vsens: String,
+    pub ads: String,
 }
 
 impl Default for Profile {
@@ -39,6 +49,14 @@ impl Default for Profile {
             week: current_week(),
             week_done: 0,
             week_goal: 5,
+            games: (0..crate::games::GAMES.len() + 1)
+                .map(|_| GameTune {
+                    sens: "0.35".to_owned(),
+                    fov: "103".to_owned(),
+                    vsens: "1".to_owned(),
+                    ads: "1".to_owned(),
+                })
+                .collect(),
         }
     }
 }
@@ -103,7 +121,26 @@ pub fn load_profile() -> Profile {
             dot: value(&text, "x_dot").is_none_or(|v| v == "1"),
         },
         train,
+        games: Vec::new(),
     };
+    let slots = crate::games::GAMES.len() + 1;
+    let sens_fallback = profile.sens.clone();
+    let fov_fallback = profile.fov.clone();
+    let vsens_fallback = profile.vsens.clone();
+    let ads_fallback = profile.ads.clone();
+    profile.games = (0..slots)
+        .map(|i| GameTune {
+            sens: value(&text, &format!("g{i}_sens")).unwrap_or(&sens_fallback).to_owned(),
+            fov: value(&text, &format!("g{i}_fov")).unwrap_or(&fov_fallback).to_owned(),
+            vsens: value(&text, &format!("g{i}_vsens")).unwrap_or(&vsens_fallback).to_owned(),
+            ads: value(&text, &format!("g{i}_ads")).unwrap_or(&ads_fallback).to_owned(),
+        })
+        .collect();
+    let selected = profile.game.min(slots - 1);
+    profile.sens = profile.games[selected].sens.clone();
+    profile.fov = profile.games[selected].fov.clone();
+    profile.vsens = profile.games[selected].vsens.clone();
+    profile.ads = profile.games[selected].ads.clone();
     let week = current_week();
     if profile.week != week {
         profile.week = week;
@@ -132,6 +169,13 @@ pub fn save_profile(profile: &Profile) {
         if humanoid { "1" } else { "0" },
         if dot { "1" } else { "0" },
     );
+    let mut text = text;
+    for (i, tune) in profile.games.iter().enumerate() {
+        text += &format!(
+            "g{i}_sens={}\ng{i}_fov={}\ng{i}_vsens={}\ng{i}_ads={}\n",
+            tune.sens, tune.fov, tune.vsens, tune.ads
+        );
+    }
     let _ = std::fs::write(PROFILE_FILE, text);
 }
 
